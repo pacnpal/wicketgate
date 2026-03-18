@@ -218,6 +218,36 @@ async function handleProxy(request, url, env) {
 		responseHeaders.delete('etag');
 		responseHeaders.delete('last-modified');
 
+		// Rewrite Location header on redirects to prevent origin hostname leakage.
+		// The origin hostname must never appear in headers sent to the client.
+		const location = responseHeaders.get('location');
+		// Rewrite Location header on redirects to prevent origin hostname leakage.
+		// The origin hostname must never appear in headers sent to the client.
+		// Only 3xx responses carry a Location meant to be followed; other statuses
+		// (e.g. 201 Created) may include a Location for informational purposes and
+		// should not be blocked.
+		if (response.status >= 300 && response.status < 400) {
+			const location = responseHeaders.get('location');
+			if (location) {
+				try {
+					// Use origin as base to correctly resolve relative Location URLs
+					const locationUrl = new URL(location, `https://${origin.hostname}`);
+					if (locationUrl.hostname === origin.hostname) {
+						// Same-origin redirect: rewrite the path through the proxy
+						const proxyBase = `${url.protocol}//${url.host}/s/${opaqueKey}`;
+						responseHeaders.set('location', `${proxyBase}${locationUrl.pathname}${locationUrl.search}${locationUrl.hash}`);
+					} else {
+						// External redirect: cannot safely proxy without potentially leaking
+						// infrastructure info. Return 502 rather than a 3xx with no Location.
+						return secureJsonError(502, 'Service unavailable.');
+					}
+				} catch {
+					// Malformed Location header from origin — treat as a failed upstream response
+					return secureJsonError(502, 'Service unavailable.');
+				}
+			}
+		}
+
 		// Add proxy CORS and security headers
 		Object.entries(proxyCorsHeaders()).forEach(([k, v]) => responseHeaders.set(k, v));
 		Object.entries(SECURITY_HEADERS).forEach(([k, v]) => responseHeaders.set(k, v));
@@ -514,10 +544,6 @@ async function discoverTunnels(env) {
 	if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID)
 		return secureJsonError(500, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID.');
 
-async function discoverTunnels(env) {
-	if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID)
-		return secureJsonError(500, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID.');
-
 	try {
 		// Fetch all pages of tunnels
 		let tunnels = [];
@@ -550,11 +576,6 @@ async function discoverTunnels(env) {
 
 		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
 		// and keep Wall-clock time predictable.
-			return secureJsonError(502, 'Tunnel API error.');
-
-		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
-		// and keep Wall-clock time predictable.
-		const tunnels = tunnelsData.result || [];
 		const hostnames = [];
 		for (let i = 0; i < tunnels.length; i += TUNNEL_FETCH_CONCURRENCY) {
 			const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
@@ -598,11 +619,11 @@ async function discoverTunnels(env) {
 		const remaining = new Set(hostnames.map(h => h.hostname.toLowerCase()));
 		let kvCursor = undefined;
 		do {
-			const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor: kvCursor, limit: LIST_MAX_ENTRIES });
+			const kvPage = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor: kvCursor, limit: LIST_MAX_ENTRIES });
 			const pageHostnames = await batchKvFetch(
-				env.WICKETGATE_KV, page.keys, (_, data) => data?.hostname ?? null
+				env.WICKETGATE_KV, kvPage.keys, (_, data) => data?.hostname ?? null
 			);
-		for (const h of pageHostnames) {
+			for (const h of pageHostnames) {
 				if (h !== null) {
 					configuredHostnames.add(h.toLowerCase());
 					remaining.delete(h.toLowerCase());
@@ -610,10 +631,15 @@ async function discoverTunnels(env) {
 			}
 			// Early exit: all tunnel hostnames accounted for, no need to read further pages
 			if (remaining.size === 0) break;
-			kvCursor = page.list_complete ? undefined : page.cursor;
+			kvCursor = kvPage.list_complete ? undefined : kvPage.cursor;
 		} while (kvCursor);
 
-			configured: configuredHostnames.has(h.hostname.toLowerCase()),
+		return adminJsonResponse(200, {
+			hostnames: hostnames.map(h => ({
+				...h,
+				configured: configuredHostnames.has(h.hostname.toLowerCase()),
+			})),
+		});
 	} catch (err) {
 		return secureJsonError(502, 'Discovery failed.');
 	}
