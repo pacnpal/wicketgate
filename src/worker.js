@@ -180,8 +180,7 @@ async function handleProxy(request, url, env) {
 	headers.set('CF-Access-Client-Id', origin.serviceTokenId);
 	headers.set('CF-Access-Client-Secret', origin.serviceTokenSecret);
 	headers.set('Host', origin.hostname);
-	// Strip client auth and cookies — don't leak client credentials to origin
-	headers.delete('Authorization');
+	// Strip browser cookies — the origin doesn't share a cookie domain with the client
 	headers.delete('Cookie');
 	// Strip headers that could confuse the origin about the real client
 	headers.delete('X-Forwarded-For');
