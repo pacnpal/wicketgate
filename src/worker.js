@@ -431,8 +431,31 @@ async function updateOrigin(slug, request, env) {
 async function deleteOrigin(slug, env) {
 	if (!(await env.WICKETGATE_KV.get(`origin:${slug}`)))
 		return secureJsonError(404, 'Not found.');
+	
+	// Find and delete all keys that reference this origin
+	const { kvKeys } = await listKvPrefix(env.WICKETGATE_KV, 'key:');
+	const keysToDelete = [];
+	
+	// Fetch key data in batches to check which ones reference this origin
+	const keyData = await batchKvFetch(env.WICKETGATE_KV, kvKeys, (k, data) => ({
+		name: k.name,
+		origin: data?.origin,
+	}));
+	
+	for (const key of keyData) {
+		if (key.origin === slug) {
+			keysToDelete.push(key.name);
+		}
+	}
+	
+	// Delete origin and associated keys
 	await env.WICKETGATE_KV.delete(`origin:${slug}`);
-	return adminJsonResponse(200, { message: 'Deleted.' });
+	await Promise.all(keysToDelete.map(k => env.WICKETGATE_KV.delete(k)));
+	
+	return adminJsonResponse(200, { 
+		message: 'Deleted.',
+		keysDeleted: keysToDelete.length 
+	});
 }
 
 
