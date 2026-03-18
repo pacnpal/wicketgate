@@ -223,8 +223,9 @@ async function handleProxy(request, url, env) {
 		const location = responseHeaders.get('location');
 		if (location) {
 			try {
-				// Use origin as base to correctly resolve relative Location URLs
-				const locationUrl = new URL(location, `https://${origin.hostname}`);
+				// Use the full origin request URL as base so relative Location headers
+				// are resolved according to RFC 3986 (preserving the request path).
+				const locationUrl = new URL(location, originRequest.url);
 				if (locationUrl.hostname === origin.hostname) {
 					// Same-origin redirect: rewrite the path through the proxy
 					const proxyBase = `${url.protocol}//${url.host}/s/${opaqueKey}`;
