@@ -212,6 +212,11 @@ async function handleProxy(request, url, env) {
 		responseHeaders.delete('cf-ray');
 		responseHeaders.delete('server');
 		responseHeaders.delete('set-cookie');
+		// Strip cache validators: Cache-Control: no-store (set below) is the primary
+		// signal, but ETag/Last-Modified can still be used for conditional revalidation
+		// requests that would bypass no-store on some clients.
+		responseHeaders.delete('etag');
+		responseHeaders.delete('last-modified');
 
 		// Add proxy CORS and security headers
 		Object.entries(proxyCorsHeaders()).forEach(([k, v]) => responseHeaders.set(k, v));
@@ -501,7 +506,7 @@ async function discoverTunnels(env) {
 		const hostnames = [];
 		for (let i = 0; i < tunnels.length; i += TUNNEL_FETCH_CONCURRENCY) {
 			const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
-			const batchResults = await Promise.allSettled(
+			await Promise.allSettled(
 				batch.map(async (tunnel) => {
 					const cfgRes = await fetch(
 						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
@@ -525,11 +530,12 @@ async function discoverTunnels(env) {
 			// Per-tunnel failures are tolerated; the tunnel is simply omitted from results
 		}
 
-		// Mark which hostnames are already configured, using paginated KV listing
-		// to avoid missing origins when there are more than 1,000 KV entries.
-		const { kvKeys } = await listKvPrefix(env.WICKETGATE_KV, 'origin:');
+		// Mark which hostnames are already configured. Use listAllKvKeys (fully
+		// paginated, no cap) so that hostnames are never incorrectly marked as
+		// unconfigured due to the LIST_MAX_ENTRIES cap in listKvPrefix.
+		const allOriginKeys = await listAllKvKeys(env.WICKETGATE_KV, 'origin:');
 		const configuredHostnames = new Set(
-			await batchKvFetch(env.WICKETGATE_KV, kvKeys, (_, data) => data?.hostname ?? null)
+			await batchKvFetch(env.WICKETGATE_KV, allOriginKeys, (_, data) => data?.hostname ?? null)
 		);
 		configuredHostnames.delete(null);
 
@@ -578,6 +584,25 @@ async function listKvPrefix(kv, prefix) {
 	const hasMore = allKeys.length > LIST_MAX_ENTRIES;
 	const kvKeys = hasMore ? allKeys.slice(0, LIST_MAX_ENTRIES) : allKeys;
 	return { kvKeys, hasMore };
+}
+
+/**
+ * List all KV keys with the given prefix, paginating through every page without
+ * a cap. Used for correctness-sensitive internal lookups (e.g. building the set
+ * of already-configured hostnames in discoverTunnels) where silently omitting
+ * entries would produce incorrect results.
+ *
+ * Returns an array of KV key objects (same shape as kv.list().keys entries).
+ */
+async function listAllKvKeys(kv, prefix) {
+	const allKeys = [];
+	let cursor = undefined;
+	do {
+		const page = await kv.list({ prefix, cursor });
+		allKeys.push(...page.keys);
+		cursor = page.list_complete ? undefined : page.cursor;
+	} while (cursor);
+	return allKeys;
 }
 
 /**
