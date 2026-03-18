@@ -220,38 +220,31 @@ async function handleProxy(request, url, env) {
 
 		// Rewrite Location header on redirects to prevent origin hostname leakage.
 		// The origin hostname must never appear in headers sent to the client.
+		// Rewrite or strip Location header regardless of status code to prevent
+		// origin hostname from leaking on 201 Created, 202 Accepted, etc.
 		const location = responseHeaders.get('location');
-		// Rewrite Location header on redirects to prevent origin hostname leakage.
-		// The origin hostname must never appear in headers sent to the client.
-		// Only 3xx responses carry a Location meant to be followed; other statuses
-		// (e.g. 201 Created) may include a Location for informational purposes and
-		// should not be blocked.
-	// Rewrite or strip Location header regardless of status code to prevent
-	// origin hostname from leaking on 201 Created, 202 Accepted, etc.
-	const location = responseHeaders.get('location');
-	if (location) {
-		try {
-			// Use origin as base to correctly resolve relative Location URLs
-			const locationUrl = new URL(location, `https://${origin.hostname}`);
-			if (locationUrl.hostname === origin.hostname) {
-				// Same-origin Location: rewrite the path through the proxy
-				const proxyBase = `${url.protocol}//${url.host}/s/${opaqueKey}`;
-				responseHeaders.set('location', `${proxyBase}${locationUrl.pathname}${locationUrl.search}${locationUrl.hash}`);
-			} else {
-				// External Location: strip for 2xx, block 3xx to prevent unresolvable redirect
+		if (location) {
+			try {
+				// Use origin as base to correctly resolve relative Location URLs
+				const locationUrl = new URL(location, `https://${origin.hostname}`);
+				if (locationUrl.hostname === origin.hostname) {
+					// Same-origin Location: rewrite the path through the proxy
+					const proxyBase = `${url.protocol}//${url.host}/s/${opaqueKey}`;
+					responseHeaders.set('location', `${proxyBase}${locationUrl.pathname}${locationUrl.search}${locationUrl.hash}`);
+				} else {
+					// External Location: strip for 2xx, block 3xx to prevent unresolvable redirect
+					if (response.status >= 300 && response.status < 400) {
+						return secureJsonError(502, 'Service unavailable.');
+					}
+					responseHeaders.delete('location');
+				}
+			} catch {
+				// Malformed Location: strip for 2xx, block 3xx
 				if (response.status >= 300 && response.status < 400) {
 					return secureJsonError(502, 'Service unavailable.');
 				}
 				responseHeaders.delete('location');
 			}
-		} catch {
-			// Malformed Location: strip for 2xx, block 3xx
-			if (response.status >= 300 && response.status < 400) {
-				return secureJsonError(502, 'Service unavailable.');
-			}
-			responseHeaders.delete('location');
-		}
-	}
 		}
 
 		// Add proxy CORS and security headers
