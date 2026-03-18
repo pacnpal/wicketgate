@@ -530,14 +530,24 @@ async function discoverTunnels(env) {
 			// Per-tunnel failures are tolerated; the tunnel is simply omitted from results
 		}
 
-		// Mark which hostnames are already configured. Use listAllKvKeys (fully
-		// paginated, no cap) so that hostnames are never incorrectly marked as
-		// unconfigured due to the LIST_MAX_ENTRIES cap in listKvPrefix.
-		const allOriginKeys = await listAllKvKeys(env.WICKETGATE_KV, 'origin:');
-		const configuredHostnames = new Set(
-			await batchKvFetch(env.WICKETGATE_KV, allOriginKeys, (_, data) => data?.hostname ?? null)
-		);
-		configuredHostnames.delete(null);
+		// Mark which hostnames are already configured. Stream KV pages so only
+		// one page of keys is held in memory at a time; exit early once every
+		// discovered tunnel hostname has been confirmed configured.
+		const tunnelHostnames = hostnames.map(h => h.hostname);
+		const configuredHostnames = new Set();
+		let kvCursor = undefined;
+		do {
+			const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor: kvCursor });
+			const pageHostnames = await batchKvFetch(
+				env.WICKETGATE_KV, page.keys, (_, data) => data?.hostname ?? null
+			);
+			for (const h of pageHostnames) {
+				if (h !== null) configuredHostnames.add(h);
+			}
+			// Early exit: all tunnel hostnames accounted for, no need to read further pages
+			if (tunnelHostnames.length > 0 && tunnelHostnames.every(h => configuredHostnames.has(h))) break;
+			kvCursor = page.list_complete ? undefined : page.cursor;
+		} while (kvCursor);
 
 		return adminJsonResponse(200, {
 			hostnames: hostnames.map(h => ({
@@ -584,25 +594,6 @@ async function listKvPrefix(kv, prefix) {
 	const hasMore = allKeys.length > LIST_MAX_ENTRIES;
 	const kvKeys = hasMore ? allKeys.slice(0, LIST_MAX_ENTRIES) : allKeys;
 	return { kvKeys, hasMore };
-}
-
-/**
- * List all KV keys with the given prefix, paginating through every page without
- * a cap. Used for correctness-sensitive internal lookups (e.g. building the set
- * of already-configured hostnames in discoverTunnels) where silently omitting
- * entries would produce incorrect results.
- *
- * Returns an array of KV key objects (same shape as kv.list().keys entries).
- */
-async function listAllKvKeys(kv, prefix) {
-	const allKeys = [];
-	let cursor = undefined;
-	do {
-		const page = await kv.list({ prefix, cursor });
-		allKeys.push(...page.keys);
-		cursor = page.list_complete ? undefined : page.cursor;
-	} while (cursor);
-	return allKeys;
 }
 
 /**
