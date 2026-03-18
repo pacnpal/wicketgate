@@ -215,11 +215,14 @@ async function handleAdmin(request, url, env) {
 		return listOrigins(env);
 	if ((p === '/admin/origins' || p === '/admin/origins/') && request.method === 'POST')
 		return createOrigin(request, env);
-	const oMatch = p.match(/^\/admin\/origins\/([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$/);
-	if (oMatch && request.method === 'DELETE')
-		return deleteOrigin(oMatch[1], env);
-	if (oMatch && request.method === 'PUT')
-		return updateOrigin(oMatch[1], request, env);
+	const oMatch = p.match(/^\/admin\/origins\/([^/]+)$/);
+	if (oMatch) {
+		const slug = oMatch[1];
+		if (slug.length > MAX_SLUG_LENGTH || !SLUG_RE.test(slug))
+			return secureJsonError(404, 'Not found.');
+		if (request.method === 'DELETE') return deleteOrigin(slug, env);
+		if (request.method === 'PUT') return updateOrigin(slug, request, env);
+	}
 
 	// ── Keys ──
 	if ((p === '/admin/keys' || p === '/admin/keys/') && request.method === 'GET')
@@ -317,6 +320,7 @@ async function createOrigin(request, env) {
 	// Validate hostname — must look like a real public DNS name
 	const hostnameError = validateHostname(hostname);
 	if (hostnameError) return secureJsonError(400, hostnameError);
+	const normalizedHostname = hostname.toLowerCase();
 
 	// Validate label
 	if (label && (typeof label !== 'string' || label.length > MAX_LABEL_LENGTH))
@@ -332,11 +336,11 @@ async function createOrigin(request, env) {
 		return secureJsonError(409, 'Origin already exists.');
 
 	await env.WICKETGATE_KV.put(`origin:${slug}`, JSON.stringify({
-		hostname, serviceTokenId, serviceTokenSecret,
+		hostname: normalizedHostname, serviceTokenId, serviceTokenSecret,
 		label: label || slug, created: new Date().toISOString(),
 	}));
 
-	return adminJsonResponse(201, { slug, hostname, label: label || slug });
+	return adminJsonResponse(201, { slug, hostname: normalizedHostname, label: label || slug });
 }
 
 async function updateOrigin(slug, request, env) {
@@ -351,7 +355,7 @@ async function updateOrigin(slug, request, env) {
 	if (body.hostname) {
 		const hostnameError = validateHostname(body.hostname);
 		if (hostnameError) return secureJsonError(400, hostnameError);
-		updated.hostname = body.hostname;
+		updated.hostname = body.hostname.toLowerCase();
 	}
 	if (body.serviceTokenId) {
 		if (typeof body.serviceTokenId !== 'string' || body.serviceTokenId.length > 200)
@@ -505,7 +509,7 @@ async function kvGetJson(kv, key) {
 /**
  * Validate a hostname for use as an origin.
  * Returns an error message string on failure, or null if valid.
- * Rejects invalid DNS syntax, reserved TLDs, and localhost variants.
+ * Rejects invalid DNS syntax, and the reserved names localhost, .local, .internal, and .localhost.
  * IP address literals (e.g. 1.2.3.4) are rejected by HOSTNAME_RE (no valid TLD).
  *
  * Note on wildcard-DNS-to-private-IP services (e.g. nip.io, sslip.io):
