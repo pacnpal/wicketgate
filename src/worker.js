@@ -543,7 +543,6 @@ async function discoverTunnels(env) {
 		// time. `remaining` tracks unchecked tunnel hostnames and is decremented O(1)
 		// per match; the loop exits early once all tunnel hostnames are confirmed.
 		const configuredHostnames = new Set();
-		const configuredHostnames = new Set();
 		const remaining = new Set(hostnames.map(h => h.hostname.toLowerCase()));
 		let kvCursor = undefined;
 		do {
