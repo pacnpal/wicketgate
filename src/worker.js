@@ -530,6 +530,14 @@ async function discoverTunnels(env) {
 			// Per-tunnel failures are tolerated; the tunnel is simply omitted from results
 		}
 
+		// If no hostnames were discovered, there's nothing to check against KV.
+		// Avoid scanning the entire `origin:` namespace in this case.
+		if (hostnames.length === 0) {
+			return adminJsonResponse(200, {
+				hostnames: [],
+			});
+		}
+
 		// Mark which hostnames are already configured. Stream KV pages so only
 		// one page of keys is held in memory at a time; exit early once every
 		// discovered tunnel hostname has been confirmed configured.
