@@ -561,12 +561,7 @@ async function discoverTunnels(env) {
 			kvCursor = page.list_complete ? undefined : page.cursor;
 		} while (kvCursor);
 
-		return adminJsonResponse(200, {
-			hostnames: hostnames.map(h => ({
-				...h,
-				configured: configuredHostnames.has(h.hostname),
-			})),
-		});
+			configured: configuredHostnames.has(h.hostname.toLowerCase()),
 	} catch (err) {
 		return secureJsonError(502, 'Discovery failed.');
 	}
