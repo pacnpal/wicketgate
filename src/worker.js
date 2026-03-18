@@ -515,17 +515,33 @@ async function discoverTunnels(env) {
 		return secureJsonError(500, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID.');
 
 	try {
-		const tunnelsRes = await fetch(
-			`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false`,
-			{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` } }
-		);
-		const tunnelsData = await tunnelsRes.json();
-		if (!tunnelsData.success)
-			return secureJsonError(502, 'Tunnel API error.');
+		// Paginate through all tunnel pages to avoid silently omitting tunnels when
+		// the account has more than the API's default page size.
+		const allTunnels = [];
+		let page = 1;
+		const PER_PAGE = 50;
+		const MAX_PAGES = 100; // safety cap (5 000 tunnels)
+		while (page <= MAX_PAGES) {
+			const tunnelsRes = await fetch(
+				`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${PER_PAGE}`,
+				{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` } }
+			);
+			const tunnelsData = await tunnelsRes.json();
+			if (!tunnelsData.success)
+				return secureJsonError(502, 'Tunnel API error.');
+
+			const pageResults = tunnelsData.result || [];
+			allTunnels.push(...pageResults);
+
+			// Stop if we got an empty page or have reached the last page.
+			const resultInfo = tunnelsData.result_info || {};
+			if (pageResults.length === 0 || resultInfo.total_pages === undefined || page >= resultInfo.total_pages) break;
+			page++;
+		}
 
 		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
 		// and keep Wall-clock time predictable.
-		const tunnels = tunnelsData.result || [];
+		const tunnels = allTunnels;
 		const hostnames = [];
 		for (let i = 0; i < tunnels.length; i += TUNNEL_FETCH_CONCURRENCY) {
 			const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
