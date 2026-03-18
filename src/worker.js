@@ -60,7 +60,7 @@ export default {
 		if (request.method === 'OPTIONS') {
 			// Only allow CORS on proxy paths, not admin
 			if (url.pathname.startsWith('/s/')) {
-				return new Response(null, { headers: { ...proxyCorsHeaders(), ...SECURITY_HEADERS } });
+				return new Response(null, { headers: { ...proxyCorsHeaders() } });
 			}
 			// Admin CORS: same-origin only (dashboard is served from same origin)
 			return new Response(null, {
