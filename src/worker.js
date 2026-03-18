@@ -550,12 +550,11 @@ async function discoverTunnels(env) {
 			const pageHostnames = await batchKvFetch(
 				env.WICKETGATE_KV, page.keys, (_, data) => data?.hostname ?? null
 			);
-			for (const h of pageHostnames) {
+		for (const h of pageHostnames) {
 				if (h !== null) {
 					configuredHostnames.add(h.toLowerCase());
 					remaining.delete(h.toLowerCase());
 				}
-			}
 			}
 			// Early exit: all tunnel hostnames accounted for, no need to read further pages
 			if (remaining.size === 0) break;
