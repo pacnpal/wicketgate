@@ -305,9 +305,9 @@ async function handleAdmin(request, url, env) {
 	if ((p === '/admin/keys' || p === '/admin/keys/') && request.method === 'GET')
 		return listKeys(env);
 	if ((p === '/admin/keys' || p === '/admin/keys/') && request.method === 'POST')
-		return createKey(request, env);
 	const kMatch = p.match(/^\/admin\/keys\/([A-Za-z0-9_-]+)$/);
-	if (kMatch && request.method === 'DELETE')
+	if (kMatch && kMatch[1].length <= 64 && request.method === 'DELETE')
+		return deleteKey(kMatch[1], env);
 		return deleteKey(kMatch[1], env);
 
 	// ── Discover ──
