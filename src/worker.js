@@ -543,7 +543,8 @@ async function discoverTunnels(env) {
 		// time. `remaining` tracks unchecked tunnel hostnames and is decremented O(1)
 		// per match; the loop exits early once all tunnel hostnames are confirmed.
 		const configuredHostnames = new Set();
-		const remaining = new Set(hostnames.map(h => h.hostname));
+		const configuredHostnames = new Set();
+		const remaining = new Set(hostnames.map(h => h.hostname.toLowerCase()));
 		let kvCursor = undefined;
 		do {
 			const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor: kvCursor, limit: LIST_MAX_ENTRIES });
@@ -552,9 +553,10 @@ async function discoverTunnels(env) {
 			);
 			for (const h of pageHostnames) {
 				if (h !== null) {
-					configuredHostnames.add(h);
-					remaining.delete(h);
+					configuredHostnames.add(h.toLowerCase());
+					remaining.delete(h.toLowerCase());
 				}
+			}
 			}
 			// Early exit: all tunnel hostnames accounted for, no need to read further pages
 			if (remaining.size === 0) break;
