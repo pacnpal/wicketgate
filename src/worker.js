@@ -29,7 +29,7 @@ const KEY_BYTES = 32; // 256-bit entropy
 // Hostnames must be valid DNS: alphanumeric, hyphens, dots, no leading/trailing dots
 const HOSTNAME_RE = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i;
 
-// Slug format: lowercase alphanumeric with hyphens, 1–48 chars
+// Slug format: lowercase alphanumeric with hyphens (length enforced separately via MAX_SLUG_LENGTH)
 const SLUG_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
 // Security headers applied to all responses
@@ -311,7 +311,7 @@ async function createOrigin(request, env) {
 	// Validate slug
 	if (typeof slug !== 'string' || slug.length > MAX_SLUG_LENGTH)
 		return secureJsonError(400, `Slug must be ${MAX_SLUG_LENGTH} characters or fewer.`);
-	if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug))
+	if (!SLUG_RE.test(slug))
 		return secureJsonError(400, 'Slug must be lowercase alphanumeric with hyphens.');
 
 	// Validate hostname — must look like a real public DNS name
@@ -506,7 +506,14 @@ async function kvGetJson(kv, key) {
  * Validate a hostname for use as an origin.
  * Returns an error message string on failure, or null if valid.
  * Rejects invalid DNS syntax, reserved TLDs, and localhost variants.
- * IP address literals are already rejected by HOSTNAME_RE (no valid TLD).
+ * IP address literals (e.g. 1.2.3.4) are rejected by HOSTNAME_RE (no valid TLD).
+ *
+ * Note on wildcard-DNS-to-private-IP services (e.g. nip.io, sslip.io):
+ * These are not blocked here because the admin API requires authentication
+ * (Cloudflare Access on /admin* or ADMIN_SECRET), so only trusted operators
+ * can register origins. A blocklist of such services would be an incomplete
+ * and fragile defence; the correct mitigation is to ensure the admin API is
+ * properly gated (see README — Auth modes).
  */
 function validateHostname(hostname) {
 	if (typeof hostname !== 'string' || hostname.length > MAX_HOSTNAME_LENGTH)

@@ -24,9 +24,9 @@ compatibility_date = "2024-12-01"
 type = "Text"
 globs = ["**/*.html"]
 
-[[kv_namespaces]]
-binding = "WICKETGATE_KV"
-id = "YOUR_KV_NAMESPACE_ID_HERE"  # Replace with the ID from step 1 above
+# [[kv_namespaces]]
+# binding = "WICKETGATE_KV"
+# id = "YOUR_KV_NAMESPACE_ID_HERE"   ← paste the ID from step 1, then uncomment
 
 # [[routes]]
 # pattern = "wicketgate.yourdomain.com/*"
