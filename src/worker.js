@@ -28,6 +28,7 @@ const MAX_REQUEST_BODY = 8192; // 8KB for admin API bodies
 const KEY_BYTES = 32; // 256-bit entropy
 const LIST_MAX_ENTRIES = 500; // Max entries returned per list call (origins or keys)
 const LIST_BATCH_SIZE = 50;   // KV reads are issued in sequential batches to stay within Worker limits
+const TUNNEL_FETCH_CONCURRENCY = 5; // Max parallel Cloudflare API requests during tunnel discovery
 
 // Hostnames must be valid DNS: alphanumeric, hyphens, dots, no leading/trailing dots
 const HOSTNAME_RE = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i;
@@ -89,6 +90,9 @@ export default {
 			return new Response(html, {
 				headers: {
 					'Content-Type': 'text/html;charset=UTF-8',
+					// Prevent caching of the admin page: the CSP nonce is per-request, and
+					// a cached page with a stale nonce would break inline script execution.
+					'Cache-Control': 'no-store',
 					// style-src requires 'unsafe-inline' because CSP nonces do not apply to
 					// style="" attributes (only to <style> elements), and the dashboard uses
 					// both. The nonce still eliminates unsafe-inline for scripts, which is
@@ -208,10 +212,17 @@ async function handleProxy(request, url, env) {
 		responseHeaders.delete('cf-ray');
 		responseHeaders.delete('server');
 		responseHeaders.delete('set-cookie');
+		// Strip cache validators: Cache-Control: no-store (set below) is the primary
+		// signal, but ETag/Last-Modified can still be used for conditional revalidation
+		// requests that would bypass no-store on some clients.
+		responseHeaders.delete('etag');
+		responseHeaders.delete('last-modified');
 
 		// Add proxy CORS and security headers
 		Object.entries(proxyCorsHeaders()).forEach(([k, v]) => responseHeaders.set(k, v));
 		Object.entries(SECURITY_HEADERS).forEach(([k, v]) => responseHeaders.set(k, v));
+		// Keys can be revoked at any time; prevent caching to avoid stale access
+		responseHeaders.set('Cache-Control', 'no-store');
 
 		return new Response(response.body, {
 			status: response.status,
@@ -489,36 +500,66 @@ async function discoverTunnels(env) {
 		if (!tunnelsData.success)
 			return secureJsonError(502, 'Tunnel API error.');
 
+		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
+		// and keep Wall-clock time predictable.
+		const tunnels = tunnelsData.result || [];
 		const hostnames = [];
-		for (const tunnel of (tunnelsData.result || [])) {
-			try {
-				const cfgRes = await fetch(
-					`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
-					{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` } }
-				);
-				const cfgData = await cfgRes.json();
-				if (cfgData.success && cfgData.result?.config?.ingress) {
-					for (const rule of cfgData.result.config.ingress) {
-						if (rule.hostname) {
-							hostnames.push({
-								hostname: rule.hostname,
-								tunnelName: tunnel.name,
-								// Intentionally omit rule.service — it exposes internal network topology
-								suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
-							});
+		for (let i = 0; i < tunnels.length; i += TUNNEL_FETCH_CONCURRENCY) {
+			const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
+			await Promise.allSettled(
+				batch.map(async (tunnel) => {
+					const cfgRes = await fetch(
+						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
+						{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` } }
+					);
+					const cfgData = await cfgRes.json();
+					if (cfgData.success && cfgData.result?.config?.ingress) {
+						for (const rule of cfgData.result.config.ingress) {
+							if (rule.hostname) {
+								hostnames.push({
+									hostname: rule.hostname,
+									tunnelName: tunnel.name,
+									// Intentionally omit rule.service — it exposes internal network topology
+									suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
+								});
+							}
 						}
 					}
-				}
-			} catch { /* skip unreadable tunnels */ }
+				})
+			);
+			// Per-tunnel failures are tolerated; the tunnel is simply omitted from results
 		}
 
-		// Mark which are already configured
-		const existingOrigins = await env.WICKETGATE_KV.list({ prefix: 'origin:' });
-		const configuredHostnames = new Set();
-		for (const k of existingOrigins.keys) {
-			const data = await kvGetJson(env.WICKETGATE_KV, k.name);
-			if (data?.hostname) configuredHostnames.add(data.hostname);
+		// If no hostnames were discovered, there's nothing to check against KV.
+		// Avoid scanning the entire `origin:` namespace in this case.
+		if (hostnames.length === 0) {
+			return adminJsonResponse(200, {
+				hostnames: [],
+			});
 		}
+
+		// Mark which hostnames are already configured. Stream KV pages (bounded by
+		// LIST_MAX_ENTRIES per page) so only one page of keys is held in memory at a
+		// time. `remaining` tracks unchecked tunnel hostnames and is decremented O(1)
+		// per match; the loop exits early once all tunnel hostnames are confirmed.
+		const configuredHostnames = new Set();
+		const remaining = new Set(hostnames.map(h => h.hostname.toLowerCase()));
+		let kvCursor = undefined;
+		do {
+			const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor: kvCursor, limit: LIST_MAX_ENTRIES });
+			const pageHostnames = await batchKvFetch(
+				env.WICKETGATE_KV, page.keys, (_, data) => data?.hostname ?? null
+			);
+		for (const h of pageHostnames) {
+				if (h !== null) {
+					configuredHostnames.add(h.toLowerCase());
+					remaining.delete(h.toLowerCase());
+				}
+			}
+			// Early exit: all tunnel hostnames accounted for, no need to read further pages
+			if (remaining.size === 0) break;
+			kvCursor = page.list_complete ? undefined : page.cursor;
+		} while (kvCursor);
 
 		return adminJsonResponse(200, {
 			hostnames: hostnames.map(h => ({
