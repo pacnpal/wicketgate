@@ -481,25 +481,42 @@ async function deleteOrigin(slug, env) {
 		return secureJsonError(404, 'Not found.');
 
 	// Paginate through ALL key pages so no keys are orphaned beyond LIST_MAX_ENTRIES.
-	// listKvPrefix() caps at LIST_MAX_ENTRIES; for deletions we must exhaust every page.
+	// Per-page KV reads are batched in parallel (LIST_BATCH_SIZE at a time) to stay within
+	// Worker CPU/memory limits while avoiding sequential one-at-a-time reads.
 	const keysToDelete = [];
 	let cursor = undefined;
 	do {
 		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: 1000 });
-		for (const kvKey of page.keys) {
-			const data = await kvGetJson(env.WICKETGATE_KV, kvKey.name);
-			if (data?.origin === slug) keysToDelete.push(kvKey.name);
+		// Read key metadata in parallel batches rather than sequentially
+		for (let i = 0; i < page.keys.length; i += LIST_BATCH_SIZE) {
+			const batch = page.keys.slice(i, i + LIST_BATCH_SIZE);
+			const values = await Promise.all(
+				batch.map(kvKey => kvGetJson(env.WICKETGATE_KV, kvKey.name))
+			);
+			for (let j = 0; j < batch.length; j++) {
+				if (values[j]?.origin === slug) keysToDelete.push(batch[j].name);
+			}
 		}
 		cursor = page.list_complete ? undefined : page.cursor;
 	} while (cursor);
 
-	// Delete origin and all associated keys
+	// Delete all associated keys first (in bounded batches) before removing the origin
+	// entry itself. This prevents the origin from disappearing while keys still exist.
+	// Promise.allSettled ensures all deletes are attempted even if some fail; collect
+	// rejected keys so partial failures are surfaced in the response rather than silently dropped.
+	let keyDeleteErrors = 0;
+	for (let i = 0; i < keysToDelete.length; i += LIST_BATCH_SIZE) {
+		const settled = await Promise.allSettled(
+			keysToDelete.slice(i, i + LIST_BATCH_SIZE).map(k => env.WICKETGATE_KV.delete(k))
+		);
+		keyDeleteErrors += settled.filter(r => r.status === 'rejected').length;
+	}
 	await env.WICKETGATE_KV.delete(`origin:${slug}`);
-	await Promise.all(keysToDelete.map(k => env.WICKETGATE_KV.delete(k)));
 
 	return adminJsonResponse(200, {
 		message: 'Deleted.',
-		keysDeleted: keysToDelete.length,
+		keysDeleted: keysToDelete.length - keyDeleteErrors,
+		...(keyDeleteErrors > 0 && { keyDeleteErrors }),
 	});
 }
 
