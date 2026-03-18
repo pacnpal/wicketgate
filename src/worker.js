@@ -29,6 +29,9 @@ const KEY_BYTES = 32; // 256-bit entropy
 // Hostnames must be valid DNS: alphanumeric, hyphens, dots, no leading/trailing dots
 const HOSTNAME_RE = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i;
 
+// Slug format: lowercase alphanumeric with hyphens (length enforced separately via MAX_SLUG_LENGTH)
+const SLUG_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+
 // Security headers applied to all responses
 const SECURITY_HEADERS = {
 	'X-Content-Type-Options': 'nosniff',
@@ -212,11 +215,14 @@ async function handleAdmin(request, url, env) {
 		return listOrigins(env);
 	if ((p === '/admin/origins' || p === '/admin/origins/') && request.method === 'POST')
 		return createOrigin(request, env);
-	const oMatch = p.match(/^\/admin\/origins\/([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$/);
-	if (oMatch && request.method === 'DELETE')
-		return deleteOrigin(oMatch[1], env);
-	if (oMatch && request.method === 'PUT')
-		return updateOrigin(oMatch[1], request, env);
+	const oMatch = p.match(/^\/admin\/origins\/([^/]+)$/);
+	if (oMatch) {
+		const slug = oMatch[1];
+		if (slug.length > MAX_SLUG_LENGTH || !SLUG_RE.test(slug))
+			return secureJsonError(404, 'Not found.');
+		if (request.method === 'DELETE') return deleteOrigin(slug, env);
+		if (request.method === 'PUT') return updateOrigin(slug, request, env);
+	}
 
 	// ── Keys ──
 	if ((p === '/admin/keys' || p === '/admin/keys/') && request.method === 'GET')
@@ -308,20 +314,13 @@ async function createOrigin(request, env) {
 	// Validate slug
 	if (typeof slug !== 'string' || slug.length > MAX_SLUG_LENGTH)
 		return secureJsonError(400, `Slug must be ${MAX_SLUG_LENGTH} characters or fewer.`);
-	if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug))
+	if (!SLUG_RE.test(slug))
 		return secureJsonError(400, 'Slug must be lowercase alphanumeric with hyphens.');
 
 	// Validate hostname — must look like a real public DNS name
-	if (typeof hostname !== 'string' || hostname.length > MAX_HOSTNAME_LENGTH)
-		return secureJsonError(400, 'Invalid hostname.');
-	if (!HOSTNAME_RE.test(hostname))
-		return secureJsonError(400, 'Hostname must be a valid public DNS name (e.g. app.yourdomain.com).');
-	// Block internal/reserved hostnames
-	const lowerHost = hostname.toLowerCase();
-	if (lowerHost === 'localhost' || lowerHost.endsWith('.local') || lowerHost.endsWith('.internal') ||
-	    lowerHost.endsWith('.localhost') || lowerHost.startsWith('10.') || lowerHost.startsWith('192.168.') ||
-	    lowerHost.startsWith('172.') || lowerHost.startsWith('127.'))
-		return secureJsonError(400, 'Hostname must be a public DNS name, not an internal address.');
+	const hostnameError = validateHostname(hostname);
+	if (hostnameError) return secureJsonError(400, hostnameError);
+	const normalizedHostname = hostname.toLowerCase();
 
 	// Validate label
 	if (label && (typeof label !== 'string' || label.length > MAX_LABEL_LENGTH))
@@ -337,11 +336,11 @@ async function createOrigin(request, env) {
 		return secureJsonError(409, 'Origin already exists.');
 
 	await env.WICKETGATE_KV.put(`origin:${slug}`, JSON.stringify({
-		hostname, serviceTokenId, serviceTokenSecret,
+		hostname: normalizedHostname, serviceTokenId, serviceTokenSecret,
 		label: label || slug, created: new Date().toISOString(),
 	}));
 
-	return adminJsonResponse(201, { slug, hostname, label: label || slug });
+	return adminJsonResponse(201, { slug, hostname: normalizedHostname, label: label || slug });
 }
 
 async function updateOrigin(slug, request, env) {
@@ -354,12 +353,9 @@ async function updateOrigin(slug, request, env) {
 	const updated = { ...existing };
 
 	if (body.hostname) {
-		if (typeof body.hostname !== 'string' || body.hostname.length > MAX_HOSTNAME_LENGTH || !HOSTNAME_RE.test(body.hostname))
-			return secureJsonError(400, 'Invalid hostname.');
-		const lh = body.hostname.toLowerCase();
-		if (lh === 'localhost' || lh.endsWith('.local') || lh.endsWith('.internal') || lh.endsWith('.localhost'))
-			return secureJsonError(400, 'Hostname must be a public DNS name.');
-		updated.hostname = body.hostname;
+		const hostnameError = validateHostname(body.hostname);
+		if (hostnameError) return secureJsonError(400, hostnameError);
+		updated.hostname = body.hostname.toLowerCase();
 	}
 	if (body.serviceTokenId) {
 		if (typeof body.serviceTokenId !== 'string' || body.serviceTokenId.length > 200)
@@ -418,6 +414,9 @@ async function createKey(request, env) {
 
 	if (!origin || typeof origin !== 'string')
 		return secureJsonError(400, 'Required: origin (slug).');
+
+	if (origin.length > MAX_SLUG_LENGTH || !SLUG_RE.test(origin))
+		return secureJsonError(400, 'Origin must be a valid slug (lowercase alphanumeric with hyphens).');
 
 	if (!(await env.WICKETGATE_KV.get(`origin:${origin}`)))
 		return secureJsonError(400, 'Origin does not exist.');
@@ -508,18 +507,66 @@ async function kvGetJson(kv, key) {
 }
 
 /**
+ * Validate a hostname for use as an origin.
+ * Returns an error message string on failure, or null if valid.
+ * Rejects invalid DNS syntax, and the reserved names localhost, .local, .internal, and .localhost.
+ * IP address literals (e.g. 1.2.3.4) are rejected by HOSTNAME_RE (no valid TLD).
+ *
+ * Note on wildcard-DNS-to-private-IP services (e.g. nip.io, sslip.io):
+ * These are not blocked here because the admin API requires authentication
+ * (Cloudflare Access on /admin* or ADMIN_SECRET), so only trusted operators
+ * can register origins. A blocklist of such services would be an incomplete
+ * and fragile defence; the correct mitigation is to ensure the admin API is
+ * properly gated (see README — Auth modes).
+ */
+function validateHostname(hostname) {
+	if (typeof hostname !== 'string' || hostname.length > MAX_HOSTNAME_LENGTH)
+		return 'Invalid hostname.';
+	if (!HOSTNAME_RE.test(hostname))
+		return 'Hostname must be a valid public DNS name (e.g. app.yourdomain.com).';
+	const lh = hostname.toLowerCase();
+	if (lh === 'localhost' || lh.endsWith('.local') || lh.endsWith('.internal') || lh.endsWith('.localhost'))
+		return 'Hostname must be a public DNS name, not an internal address.';
+	return null;
+}
+
+/**
  * Parse JSON from request body with a size limit.
+ * Reads the body incrementally and aborts as soon as maxBytes is exceeded.
  * Returns null if body is too large, invalid JSON, or missing.
  */
 async function safeLimitedJson(request, maxBytes) {
 	try {
-		const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
-		if (contentLength > maxBytes) return null;
+		const clHeader = request.headers.get('Content-Length');
+		if (clHeader !== null) {
+			const contentLength = parseInt(clHeader, 10);
+			if (isNaN(contentLength) || contentLength > maxBytes) return null;
+		}
 
-		// Read body as text with a size guard
-		const text = await request.text();
-		if (text.length > maxBytes) return null;
+		if (!request.body) return null;
 
+		// Read body incrementally, aborting early if limit is exceeded
+		const reader = request.body.getReader();
+		const chunks = [];
+		let totalBytes = 0;
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			totalBytes += value.byteLength;
+			if (totalBytes > maxBytes) {
+				reader.cancel();
+				return null;
+			}
+			chunks.push(value);
+		}
+
+		const combined = new Uint8Array(totalBytes);
+		let offset = 0;
+		for (const chunk of chunks) {
+			combined.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		const text = new TextDecoder().decode(combined);
 		return JSON.parse(text);
 	} catch { return null; }
 }

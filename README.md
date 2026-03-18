@@ -441,7 +441,9 @@ https://wicketgate.yourdomain.com/s/xK9mQ2vL8nP4wR7j/api/endpoint
 
 ### Browser bookmark
 
-Just bookmark the URL. Works for services with web UIs:
+Note: The proxy strips `Cookie` headers from requests and `Set-Cookie` from responses, so session-based web UIs (apps that require login) will not work through a bookmark. Wicketgate is best suited for API access or services that do not rely on cookies for session state.
+
+For services that do work without cookies, you can bookmark the URL:
 
 ```
 https://wicketgate.yourdomain.com/s/xK9mQ2vL8nP4wR7j/
@@ -474,8 +476,6 @@ Response:
     {
       "slug": "jellyfin",
       "hostname": "jellyfin.yourdomain.com",
-      "serviceTokenId": "abc123...",
-      "serviceTokenSecret": "••••••",
       "label": "Media server",
       "created": "2026-03-18T12:00:00.000Z"
     }
@@ -483,7 +483,7 @@ Response:
 }
 ```
 
-Note: `serviceTokenSecret` is redacted in list responses.
+Note: credential fields (`serviceTokenId`, `serviceTokenSecret`) are omitted from list responses.
 
 #### Create origin
 
@@ -634,14 +634,12 @@ Response:
   "hostnames": [
     {
       "hostname": "jellyfin.yourdomain.com",
-      "service": "http://localhost:8096",
       "tunnelName": "homelab",
       "suggestedSlug": "jellyfin",
       "configured": false
     },
     {
       "hostname": "ha.yourdomain.com",
-      "service": "http://localhost:8123",
       "tunnelName": "homelab",
       "suggestedSlug": "ha",
       "configured": true
@@ -734,9 +732,9 @@ Error responses are deliberately vague:
 | Situation | Response |
 |-----------|----------|
 | Invalid key | `403 Access denied.` |
-| Origin not configured | `502 Origin unavailable.` |
-| Origin unreachable | `502 Origin unreachable.` |
-| Bad URL format | `400 Not found.` |
+| Origin not configured or fetch error | `502 Service unavailable.` |
+| Path traversal attempt | `400 Not found.` |
+| Unknown URL pattern | `404 Not found.` |
 
 No internal details, hostnames, or configuration info is ever leaked.
 
@@ -754,11 +752,11 @@ All secret/key validation uses constant-time comparison to prevent timing attack
 
 ### CORS
 
-The Worker returns `Access-Control-Allow-Origin: *` on proxy responses, allowing browser-based clients. If you know your client origins, restrict this in the `corsHeaders()` function in `worker.js`.
+The Worker returns `Access-Control-Allow-Origin: *` on proxy responses, allowing browser-based clients. If you know your client origins, restrict this in the `proxyCorsHeaders()` function in `worker.js`.
 
 ### Key entropy
 
-Access keys are 24 random bytes (192 bits of entropy), URL-safe base64 encoded. Brute-forcing a key at 1 billion attempts per second would take approximately 2×10^38 years.
+Access keys are 32 random bytes (256 bits of entropy), URL-safe base64 encoded. Brute-forcing a key at 1 billion attempts per second would take approximately 3.7×10^60 years.
 
 ---
 
