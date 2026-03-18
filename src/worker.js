@@ -538,22 +538,26 @@ async function discoverTunnels(env) {
 			});
 		}
 
-		// Mark which hostnames are already configured. Stream KV pages so only
-		// one page of keys is held in memory at a time; exit early once every
-		// discovered tunnel hostname has been confirmed configured.
-		const tunnelHostnames = hostnames.map(h => h.hostname);
+		// Mark which hostnames are already configured. Stream KV pages (bounded by
+		// LIST_MAX_ENTRIES per page) so only one page of keys is held in memory at a
+		// time. `remaining` tracks unchecked tunnel hostnames and is decremented O(1)
+		// per match; the loop exits early once all tunnel hostnames are confirmed.
 		const configuredHostnames = new Set();
+		const remaining = new Set(hostnames.map(h => h.hostname));
 		let kvCursor = undefined;
 		do {
-			const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor: kvCursor });
+			const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor: kvCursor, limit: LIST_MAX_ENTRIES });
 			const pageHostnames = await batchKvFetch(
 				env.WICKETGATE_KV, page.keys, (_, data) => data?.hostname ?? null
 			);
 			for (const h of pageHostnames) {
-				if (h !== null) configuredHostnames.add(h);
+				if (h !== null) {
+					configuredHostnames.add(h);
+					remaining.delete(h);
+				}
 			}
 			// Early exit: all tunnel hostnames accounted for, no need to read further pages
-			if (tunnelHostnames.length > 0 && tunnelHostnames.every(h => configuredHostnames.has(h))) break;
+			if (remaining.size === 0) break;
 			kvCursor = page.list_complete ? undefined : page.cursor;
 		} while (kvCursor);
 
