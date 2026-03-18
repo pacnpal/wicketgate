@@ -203,8 +203,23 @@ async function handleProxy(request, url, env) {
 		redirect: 'manual',
 	});
 
+	// Timeout to avoid tying up the Worker on slow/unresponsive origins.
+	// Cloudflare enforces a 30 s wall-clock limit; use 25 s so we can return
+	// a clean 504 before the runtime kills the request.
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+	let response;
 	try {
-		const response = await fetch(originRequest);
+		response = await fetch(originRequest, { signal: controller.signal });
+	} catch (err) {
+		clearTimeout(timeoutId);
+		if (err.name === 'AbortError') return secureJsonError(504, 'Gateway timeout.');
+		return secureJsonError(502, 'Service unavailable.');
+	}
+	clearTimeout(timeoutId);
+
+	try {
 		const responseHeaders = new Headers(response.headers);
 
 		// Strip sensitive origin response headers
@@ -247,9 +262,13 @@ async function handleProxy(request, url, env) {
 			}
 		}
 
-		// Add proxy CORS and security headers
+		// Add proxy CORS headers.
+		// NOTE: SECURITY_HEADERS (X-Frame-Options, Permissions-Policy, etc.) are
+		// intentionally NOT set here — stamping them on proxied responses would
+		// silently break browser-based web UIs that rely on iframes, hardware APIs,
+		// or Referer-based CSRF protection. Those headers are only appropriate for
+		// admin/dashboard responses where we control the content.
 		Object.entries(proxyCorsHeaders()).forEach(([k, v]) => responseHeaders.set(k, v));
-		Object.entries(SECURITY_HEADERS).forEach(([k, v]) => responseHeaders.set(k, v));
 		// Keys can be revoked at any time; prevent caching to avoid stale access
 		responseHeaders.set('Cache-Control', 'no-store');
 
@@ -305,9 +324,9 @@ async function handleAdmin(request, url, env) {
 	if ((p === '/admin/keys' || p === '/admin/keys/') && request.method === 'GET')
 		return listKeys(env);
 	if ((p === '/admin/keys' || p === '/admin/keys/') && request.method === 'POST')
+		return createKey(request, env);
 	const kMatch = p.match(/^\/admin\/keys\/([A-Za-z0-9_-]+)$/);
 	if (kMatch && kMatch[1].length <= 64 && request.method === 'DELETE')
-		return deleteKey(kMatch[1], env);
 		return deleteKey(kMatch[1], env);
 
 	// ── Discover ──
@@ -460,30 +479,27 @@ async function updateOrigin(slug, request, env) {
 async function deleteOrigin(slug, env) {
 	if (!(await env.WICKETGATE_KV.get(`origin:${slug}`)))
 		return secureJsonError(404, 'Not found.');
-	
-	// Find and delete all keys that reference this origin
-	const { kvKeys } = await listKvPrefix(env.WICKETGATE_KV, 'key:');
+
+	// Paginate through ALL key pages so no keys are orphaned beyond LIST_MAX_ENTRIES.
+	// listKvPrefix() caps at LIST_MAX_ENTRIES; for deletions we must exhaust every page.
 	const keysToDelete = [];
-	
-	// Fetch key data in batches to check which ones reference this origin
-	const keyData = await batchKvFetch(env.WICKETGATE_KV, kvKeys, (k, data) => ({
-		name: k.name,
-		origin: data?.origin,
-	}));
-	
-	for (const key of keyData) {
-		if (key.origin === slug) {
-			keysToDelete.push(key.name);
+	let cursor = undefined;
+	do {
+		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: 1000 });
+		for (const kvKey of page.keys) {
+			const data = await kvGetJson(env.WICKETGATE_KV, kvKey.name);
+			if (data?.origin === slug) keysToDelete.push(kvKey.name);
 		}
-	}
-	
-	// Delete origin and associated keys
+		cursor = page.list_complete ? undefined : page.cursor;
+	} while (cursor);
+
+	// Delete origin and all associated keys
 	await env.WICKETGATE_KV.delete(`origin:${slug}`);
 	await Promise.all(keysToDelete.map(k => env.WICKETGATE_KV.delete(k)));
-	
-	return adminJsonResponse(200, { 
+
+	return adminJsonResponse(200, {
 		message: 'Deleted.',
-		keysDeleted: keysToDelete.length 
+		keysDeleted: keysToDelete.length,
 	});
 }
 
