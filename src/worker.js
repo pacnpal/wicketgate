@@ -11,9 +11,10 @@
  *   key:{key}      → { name, origin, created }
  *
  * Secrets:
- *   ADMIN_SECRET   - For the admin dashboard / API (optional)
- *   CF_API_TOKEN   - Cloudflare API token (optional, for tunnel discovery)
- *   CF_ACCOUNT_ID  - Cloudflare account ID (optional, for tunnel discovery)
+ *   ADMIN_SECRET        - Required for admin dashboard / API unless ALLOW_UNAUTH_ADMIN is set
+ *   ALLOW_UNAUTH_ADMIN  - Set to "true" to skip built-in auth (only when /admin/* is externally gated)
+ *   CF_API_TOKEN        - Cloudflare API token (optional, for tunnel discovery)
+ *   CF_ACCOUNT_ID       - Cloudflare account ID (optional, for tunnel discovery)
  */
 
 import DASHBOARD_HTML from './dashboard.html';
@@ -73,10 +74,20 @@ export default {
 
 		// ── Admin dashboard ──
 		if (url.pathname === '/admin' || url.pathname === '/admin/') {
-			return new Response(DASHBOARD_HTML, {
+			// Generate a per-request CSP nonce to replace unsafe-inline
+			const nonceBytes = new Uint8Array(16);
+			crypto.getRandomValues(nonceBytes);
+			const nonce = btoa(String.fromCharCode(...nonceBytes));
+
+			// Inject nonce into inline <style> and <script> tags
+			const html = DASHBOARD_HTML
+				.replace('<style>', `<style nonce="${nonce}">`)
+				.replace('<script>', `<script nonce="${nonce}">`);
+
+			return new Response(html, {
 				headers: {
 					'Content-Type': 'text/html;charset=UTF-8',
-					'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'",
+					'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'`,
 					...SECURITY_HEADERS,
 				},
 			});
@@ -84,7 +95,8 @@ export default {
 
 		// ── Auth mode check ──
 		if (url.pathname === '/admin/auth-mode') {
-			return secureJsonResponse(200, { authRequired: !!env.ADMIN_SECRET });
+			const authDisabled = env.ALLOW_UNAUTH_ADMIN === 'true';
+			return secureJsonResponse(200, { authRequired: !authDisabled && !!env.ADMIN_SECRET });
 		}
 
 		// ── Admin API ──
@@ -162,6 +174,14 @@ async function handleProxy(request, url, env) {
 	headers.delete('X-Forwarded-For');
 	headers.delete('X-Real-IP');
 	headers.delete('CF-Connecting-IP');
+	// Strip headers that could leak the access key URL to the origin via Referer/Origin
+	headers.delete('Referer');
+	headers.delete('Origin');
+	// Strip browser fetch metadata headers (could expose key URL or internal routing)
+	headers.delete('Sec-Fetch-Site');
+	headers.delete('Sec-Fetch-Mode');
+	headers.delete('Sec-Fetch-Dest');
+	headers.delete('Sec-Fetch-User');
 
 	const originRequest = new Request(originUrl.toString(), {
 		method: request.method,
@@ -203,7 +223,15 @@ async function handleAdmin(request, url, env) {
 	if (!env.WICKETGATE_KV) return secureJsonError(500, 'Service unavailable.');
 
 	// ── Auth ──
-	if (env.ADMIN_SECRET) {
+	// Auth is required unless ALLOW_UNAUTH_ADMIN is explicitly set to "true".
+	// IMPORTANT: Only set ALLOW_UNAUTH_ADMIN=true when the /admin/* routes are
+	// externally gated (e.g., behind Cloudflare Access), otherwise admin is public.
+	const authDisabled = env.ALLOW_UNAUTH_ADMIN === 'true';
+	if (!authDisabled) {
+		if (!env.ADMIN_SECRET) {
+			// No secret configured and opt-out not set — block all admin access
+			return secureJsonError(403, 'Admin access requires ADMIN_SECRET or ALLOW_UNAUTH_ADMIN=true.');
+		}
 		const authResult = checkAdminAuth(request, env.ADMIN_SECRET);
 		if (authResult) return authResult; // Returns a Response on failure, null on success
 	}
@@ -240,8 +268,16 @@ async function handleAdmin(request, url, env) {
 	return secureJsonError(404, 'Not found.');
 }
 
+// Max Authorization header length to prevent resource exhaustion via timingSafeEqual
+const MAX_AUTH_HEADER_LENGTH = 1024;
+
 function checkAdminAuth(request, secret) {
 	const authHeader = request.headers.get('Authorization') || '';
+
+	// Reject excessively long auth headers before any comparison
+	if (authHeader.length > MAX_AUTH_HEADER_LENGTH) {
+		return secureJsonError(401, 'Unauthorized.');
+	}
 
 	// Bearer token (dashboard JS)
 	const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
@@ -287,9 +323,16 @@ function checkAdminAuth(request, secret) {
 // ─── Origin CRUD ────────────────────────────────────────────────────
 
 async function listOrigins(env) {
-	const keys = await env.WICKETGATE_KV.list({ prefix: 'origin:' });
+	const allKeys = [];
+	let cursor = undefined;
+	do {
+		const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor });
+		allKeys.push(...page.keys);
+		cursor = page.list_complete ? undefined : page.cursor;
+	} while (cursor);
+
 	const origins = await Promise.all(
-		keys.keys.map(async (k) => {
+		allKeys.map(async (k) => {
 			const data = await kvGetJson(env.WICKETGATE_KV, k.name);
 			return {
 				slug: k.name.replace(/^origin:/, ''),
@@ -388,9 +431,16 @@ async function deleteOrigin(slug, env) {
 // ─── Key CRUD ───────────────────────────────────────────────────────
 
 async function listKeys(env) {
-	const keys = await env.WICKETGATE_KV.list({ prefix: 'key:' });
+	const allKeys = [];
+	let cursor = undefined;
+	do {
+		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor });
+		allKeys.push(...page.keys);
+		cursor = page.list_complete ? undefined : page.cursor;
+	} while (cursor);
+
 	const results = await Promise.all(
-		keys.keys.map(async (k) => {
+		allKeys.map(async (k) => {
 			const data = await kvGetJson(env.WICKETGATE_KV, k.name);
 			const fullKey = k.name.replace(/^key:/, '');
 			return {

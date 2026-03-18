@@ -6,7 +6,7 @@
 #    Paste the ID below.
 #
 # 2. Secrets:
-#    npx wrangler secret put ADMIN_SECRET
+#    npx wrangler secret put ADMIN_SECRET           # required (or set ALLOW_UNAUTH_ADMIN=true)
 #    npx wrangler secret put CF_API_TOKEN      # optional, for discovery
 #    npx wrangler secret put CF_ACCOUNT_ID     # optional, for discovery
 #
