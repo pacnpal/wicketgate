@@ -298,6 +298,8 @@ You need one service token per Access application. If multiple hostnames share a
 | `CF_API_TOKEN` | No | Cloudflare API token for tunnel discovery. Needs `Account > Cloudflare Tunnel > Read`. |
 | `CF_ACCOUNT_ID` | No | Your Cloudflare account ID. Required alongside `CF_API_TOKEN`. |
 
+\* Required unless `ALLOW_UNAUTH_ADMIN=true` is explicitly set (external-gate mode only).
+
 ### KV namespace
 
 | Binding | Description |

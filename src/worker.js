@@ -332,37 +332,14 @@ function checkAdminAuth(request, secret) {
 // ─── Origin CRUD ────────────────────────────────────────────────────
 
 async function listOrigins(env) {
-	// Collect KV keys up to LIST_MAX_ENTRIES + 1 (the extra entry detects truncation)
-	const allKeys = [];
-	let cursor = undefined;
-	do {
-		const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor });
-		allKeys.push(...page.keys);
-		cursor = page.list_complete ? undefined : page.cursor;
-	} while (cursor && allKeys.length < LIST_MAX_ENTRIES + 1);
-
-	const hasMore = allKeys.length > LIST_MAX_ENTRIES;
-	const keys = hasMore ? allKeys.slice(0, LIST_MAX_ENTRIES) : allKeys;
-
-	// Fetch KV values in bounded batches to avoid exceeding Worker CPU/memory limits
-	const origins = [];
-	for (let i = 0; i < keys.length; i += LIST_BATCH_SIZE) {
-		const batch = keys.slice(i, i + LIST_BATCH_SIZE);
-		const batchResults = await Promise.all(
-			batch.map(async (k) => {
-				const data = await kvGetJson(env.WICKETGATE_KV, k.name);
-				return {
-					slug: k.name.replace(/^origin:/, ''),
-					hostname: data?.hostname,
-					label: data?.label,
-					created: data?.created,
-					// Redact all credential fields
-				};
-			})
-		);
-		origins.push(...batchResults);
-	}
-
+	const { kvKeys, hasMore } = await listKvPrefix(env.WICKETGATE_KV, 'origin:');
+	const origins = await batchKvFetch(env.WICKETGATE_KV, kvKeys, (k, data) => ({
+		slug: k.name.replace(/^origin:/, ''),
+		hostname: data?.hostname,
+		label: data?.label,
+		created: data?.created,
+		// Redact all credential fields
+	}));
 	return adminJsonResponse(200, { origins, hasMore });
 }
 
@@ -451,38 +428,17 @@ async function deleteOrigin(slug, env) {
 // ─── Key CRUD ───────────────────────────────────────────────────────
 
 async function listKeys(env) {
-	// Collect KV keys up to LIST_MAX_ENTRIES + 1 (the extra entry detects truncation)
-	const allKeys = [];
-	let cursor = undefined;
-	do {
-		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor });
-		allKeys.push(...page.keys);
-		cursor = page.list_complete ? undefined : page.cursor;
-	} while (cursor && allKeys.length < LIST_MAX_ENTRIES + 1);
-
-	const hasMore = allKeys.length > LIST_MAX_ENTRIES;
-	const keys = hasMore ? allKeys.slice(0, LIST_MAX_ENTRIES) : allKeys;
-
-	// Fetch KV values in bounded batches to avoid exceeding Worker CPU/memory limits
-	const results = [];
-	for (let i = 0; i < keys.length; i += LIST_BATCH_SIZE) {
-		const batch = keys.slice(i, i + LIST_BATCH_SIZE);
-		const batchResults = await Promise.all(
-			batch.map(async (k) => {
-				const data = await kvGetJson(env.WICKETGATE_KV, k.name);
-				const fullKey = k.name.replace(/^key:/, '');
-				return {
-					key: fullKey,
-					keyPrefix: fullKey.slice(0, 8) + '...',
-					name: data?.name,
-					origin: data?.origin,
-					created: data?.created,
-				};
-			})
-		);
-		results.push(...batchResults);
-	}
-
+	const { kvKeys, hasMore } = await listKvPrefix(env.WICKETGATE_KV, 'key:');
+	const results = await batchKvFetch(env.WICKETGATE_KV, kvKeys, (k, data) => {
+		const fullKey = k.name.replace(/^key:/, '');
+		return {
+			key: fullKey,
+			keyPrefix: fullKey.slice(0, 8) + '...',
+			name: data?.name,
+			origin: data?.origin,
+			created: data?.created,
+		};
+	});
 	return adminJsonResponse(200, { keys: results, hasMore });
 }
 
@@ -585,6 +541,50 @@ async function kvGetJson(kv, key) {
 		const val = await kv.get(key);
 		return val ? JSON.parse(val) : null;
 	} catch { return null; }
+}
+
+/**
+ * List KV keys with the given prefix, paginating up to LIST_MAX_ENTRIES + 1.
+ * Each page requests only as many keys as are still needed, so we never ask
+ * the KV API for more than LIST_MAX_ENTRIES + 1 entries in total.
+ *
+ * Returns { kvKeys, hasMore } where hasMore indicates the namespace has more
+ * entries beyond the cap.
+ */
+async function listKvPrefix(kv, prefix) {
+	const allKeys = [];
+	let cursor = undefined;
+	do {
+		// Request only the remaining entries needed (+1 to detect truncation)
+		const limit = LIST_MAX_ENTRIES + 1 - allKeys.length;
+		const page = await kv.list({ prefix, cursor, limit });
+		allKeys.push(...page.keys);
+		cursor = page.list_complete ? undefined : page.cursor;
+	} while (cursor && allKeys.length < LIST_MAX_ENTRIES + 1);
+
+	const hasMore = allKeys.length > LIST_MAX_ENTRIES;
+	const kvKeys = hasMore ? allKeys.slice(0, LIST_MAX_ENTRIES) : allKeys;
+	return { kvKeys, hasMore };
+}
+
+/**
+ * Fetch KV values for an array of keys in sequential batches of LIST_BATCH_SIZE,
+ * avoiding unbounded concurrent requests that could exceed Worker CPU/memory limits.
+ * `mapFn(kvKey, data)` maps each key + parsed JSON value to a response object.
+ */
+async function batchKvFetch(kv, kvKeys, mapFn) {
+	const results = [];
+	for (let i = 0; i < kvKeys.length; i += LIST_BATCH_SIZE) {
+		const batch = kvKeys.slice(i, i + LIST_BATCH_SIZE);
+		const batchResults = await Promise.all(
+			batch.map(async (k) => {
+				const data = await kvGetJson(kv, k.name);
+				return mapFn(k, data);
+			})
+		);
+		results.push(...batchResults);
+	}
+	return results;
 }
 
 /**
