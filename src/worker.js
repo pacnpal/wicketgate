@@ -728,12 +728,15 @@ function generateKey() {
  */
 function timingSafeEqual(a, b) {
 	const enc = new TextEncoder();
-	const maxLen = Math.max(a.length, b.length);
-	// Pad both to the same length so we always compare the same number of bytes
-	const aBuf = enc.encode(a.padEnd(maxLen, '\0'));
-	const bBuf = enc.encode(b.padEnd(maxLen, '\0'));
-	let r = a.length ^ b.length; // Will be non-zero if lengths differ
-	for (let i = 0; i < maxLen; i++) r |= aBuf[i] ^ bBuf[i];
+	const aBuf = enc.encode(a);
+	const bBuf = enc.encode(b);
+	const maxLen = Math.max(aBuf.length, bBuf.length);
+	const aPadded = new Uint8Array(maxLen);
+	const bPadded = new Uint8Array(maxLen);
+	aPadded.set(aBuf);
+	bPadded.set(bBuf);
+	let r = aBuf.length ^ bBuf.length;
+	for (let i = 0; i < maxLen; i++) r |= aPadded[i] ^ bPadded[i];
 	return r === 0;
 }
 
