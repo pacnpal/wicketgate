@@ -11,9 +11,10 @@
  *   key:{key}      → { name, origin, created }
  *
  * Secrets:
- *   ADMIN_SECRET   - For the admin dashboard / API (optional)
- *   CF_API_TOKEN   - Cloudflare API token (optional, for tunnel discovery)
- *   CF_ACCOUNT_ID  - Cloudflare account ID (optional, for tunnel discovery)
+ *   ADMIN_SECRET        - Required for admin dashboard / API unless ALLOW_UNAUTH_ADMIN is set
+ *   ALLOW_UNAUTH_ADMIN  - Set to "true" to skip built-in auth (only when /admin/* is externally gated)
+ *   CF_API_TOKEN        - Cloudflare API token (optional, for tunnel discovery)
+ *   CF_ACCOUNT_ID       - Cloudflare account ID (optional, for tunnel discovery)
  */
 
 import DASHBOARD_HTML from './dashboard.html';
@@ -25,6 +26,8 @@ const MAX_HOSTNAME_LENGTH = 253;
 const MAX_NAME_LENGTH = 100;
 const MAX_REQUEST_BODY = 8192; // 8KB for admin API bodies
 const KEY_BYTES = 32; // 256-bit entropy
+const LIST_MAX_ENTRIES = 500; // Max entries returned per list call (origins or keys)
+const LIST_BATCH_SIZE = 50;   // KV reads are issued in sequential batches to stay within Worker limits
 
 // Hostnames must be valid DNS: alphanumeric, hyphens, dots, no leading/trailing dots
 const HOSTNAME_RE = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i;
@@ -73,10 +76,24 @@ export default {
 
 		// ── Admin dashboard ──
 		if (url.pathname === '/admin' || url.pathname === '/admin/') {
-			return new Response(DASHBOARD_HTML, {
+			// Generate a per-request CSP nonce to replace unsafe-inline
+			const nonceBytes = new Uint8Array(16);
+			crypto.getRandomValues(nonceBytes);
+			const nonce = btoa(String.fromCharCode(...nonceBytes));
+
+			// Inject nonce into inline <style> and <script> tags
+			const html = DASHBOARD_HTML
+				.replace('<style>', `<style nonce="${nonce}">`)
+				.replace('<script>', `<script nonce="${nonce}">`);
+
+			return new Response(html, {
 				headers: {
 					'Content-Type': 'text/html;charset=UTF-8',
-					'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'",
+					// style-src requires 'unsafe-inline' because CSP nonces do not apply to
+					// style="" attributes (only to <style> elements), and the dashboard uses
+					// both. The nonce still eliminates unsafe-inline for scripts, which is
+					// the higher-risk surface.
+					'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'`,
 					...SECURITY_HEADERS,
 				},
 			});
@@ -84,7 +101,11 @@ export default {
 
 		// ── Auth mode check ──
 		if (url.pathname === '/admin/auth-mode') {
-			return secureJsonResponse(200, { authRequired: !!env.ADMIN_SECRET });
+			const authDisabled = env.ALLOW_UNAUTH_ADMIN === 'true';
+			// authRequired is true unless explicitly opted out via ALLOW_UNAUTH_ADMIN.
+			// Even when ADMIN_SECRET is missing (misconfigured), authRequired=true so the
+			// dashboard shows the login screen; admin calls will return 403 until fixed.
+			return secureJsonResponse(200, { authRequired: !authDisabled });
 		}
 
 		// ── Admin API ──
@@ -162,6 +183,14 @@ async function handleProxy(request, url, env) {
 	headers.delete('X-Forwarded-For');
 	headers.delete('X-Real-IP');
 	headers.delete('CF-Connecting-IP');
+	// Strip headers that could leak the access key URL to the origin via Referer/Origin
+	headers.delete('Referer');
+	headers.delete('Origin');
+	// Strip browser fetch metadata headers (could expose key URL or internal routing)
+	headers.delete('Sec-Fetch-Site');
+	headers.delete('Sec-Fetch-Mode');
+	headers.delete('Sec-Fetch-Dest');
+	headers.delete('Sec-Fetch-User');
 
 	const originRequest = new Request(originUrl.toString(), {
 		method: request.method,
@@ -203,7 +232,15 @@ async function handleAdmin(request, url, env) {
 	if (!env.WICKETGATE_KV) return secureJsonError(500, 'Service unavailable.');
 
 	// ── Auth ──
-	if (env.ADMIN_SECRET) {
+	// Auth is required unless ALLOW_UNAUTH_ADMIN is explicitly set to "true".
+	// IMPORTANT: Only set ALLOW_UNAUTH_ADMIN=true when the /admin/* routes are
+	// externally gated (e.g., behind Cloudflare Access), otherwise admin is public.
+	const authDisabled = env.ALLOW_UNAUTH_ADMIN === 'true';
+	if (!authDisabled) {
+		if (!env.ADMIN_SECRET) {
+			// No secret configured and opt-out not set — block all admin access
+			return secureJsonError(403, 'Admin access requires ADMIN_SECRET or ALLOW_UNAUTH_ADMIN=true.');
+		}
 		const authResult = checkAdminAuth(request, env.ADMIN_SECRET);
 		if (authResult) return authResult; // Returns a Response on failure, null on success
 	}
@@ -240,8 +277,16 @@ async function handleAdmin(request, url, env) {
 	return secureJsonError(404, 'Not found.');
 }
 
+// Max Authorization header length to prevent resource exhaustion via timingSafeEqual
+const MAX_AUTH_HEADER_LENGTH = 1024;
+
 function checkAdminAuth(request, secret) {
 	const authHeader = request.headers.get('Authorization') || '';
+
+	// Reject excessively long auth headers before any comparison
+	if (authHeader.length > MAX_AUTH_HEADER_LENGTH) {
+		return secureJsonError(401, 'Unauthorized.');
+	}
 
 	// Bearer token (dashboard JS)
 	const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
@@ -287,20 +332,15 @@ function checkAdminAuth(request, secret) {
 // ─── Origin CRUD ────────────────────────────────────────────────────
 
 async function listOrigins(env) {
-	const keys = await env.WICKETGATE_KV.list({ prefix: 'origin:' });
-	const origins = await Promise.all(
-		keys.keys.map(async (k) => {
-			const data = await kvGetJson(env.WICKETGATE_KV, k.name);
-			return {
-				slug: k.name.replace(/^origin:/, ''),
-				hostname: data?.hostname,
-				label: data?.label,
-				created: data?.created,
-				// Redact all credential fields
-			};
-		})
-	);
-	return adminJsonResponse(200, { origins });
+	const { kvKeys, hasMore } = await listKvPrefix(env.WICKETGATE_KV, 'origin:');
+	const origins = await batchKvFetch(env.WICKETGATE_KV, kvKeys, (k, data) => ({
+		slug: k.name.replace(/^origin:/, ''),
+		hostname: data?.hostname,
+		label: data?.label,
+		created: data?.created,
+		// Redact all credential fields
+	}));
+	return adminJsonResponse(200, { origins, hasMore });
 }
 
 async function createOrigin(request, env) {
@@ -388,21 +428,18 @@ async function deleteOrigin(slug, env) {
 // ─── Key CRUD ───────────────────────────────────────────────────────
 
 async function listKeys(env) {
-	const keys = await env.WICKETGATE_KV.list({ prefix: 'key:' });
-	const results = await Promise.all(
-		keys.keys.map(async (k) => {
-			const data = await kvGetJson(env.WICKETGATE_KV, k.name);
-			const fullKey = k.name.replace(/^key:/, '');
-			return {
-				key: fullKey,
-				keyPrefix: fullKey.slice(0, 8) + '...',
-				name: data?.name,
-				origin: data?.origin,
-				created: data?.created,
-			};
-		})
-	);
-	return adminJsonResponse(200, { keys: results });
+	const { kvKeys, hasMore } = await listKvPrefix(env.WICKETGATE_KV, 'key:');
+	const results = await batchKvFetch(env.WICKETGATE_KV, kvKeys, (k, data) => {
+		const fullKey = k.name.replace(/^key:/, '');
+		return {
+			key: fullKey,
+			keyPrefix: fullKey.slice(0, 8) + '...',
+			name: data?.name,
+			origin: data?.origin,
+			created: data?.created,
+		};
+	});
+	return adminJsonResponse(200, { keys: results, hasMore });
 }
 
 async function createKey(request, env) {
@@ -504,6 +541,50 @@ async function kvGetJson(kv, key) {
 		const val = await kv.get(key);
 		return val ? JSON.parse(val) : null;
 	} catch { return null; }
+}
+
+/**
+ * List KV keys with the given prefix, paginating up to LIST_MAX_ENTRIES + 1.
+ * Each page requests only as many keys as are still needed, so we never ask
+ * the KV API for more than LIST_MAX_ENTRIES + 1 entries in total.
+ *
+ * Returns { kvKeys, hasMore } where hasMore indicates the namespace has more
+ * entries beyond the cap.
+ */
+async function listKvPrefix(kv, prefix) {
+	const allKeys = [];
+	let cursor = undefined;
+	do {
+		// Request only the remaining entries needed (+1 to detect truncation)
+		const limit = LIST_MAX_ENTRIES + 1 - allKeys.length;
+		const page = await kv.list({ prefix, cursor, limit });
+		allKeys.push(...page.keys);
+		cursor = page.list_complete ? undefined : page.cursor;
+	} while (cursor && allKeys.length < LIST_MAX_ENTRIES + 1);
+
+	const hasMore = allKeys.length > LIST_MAX_ENTRIES;
+	const kvKeys = hasMore ? allKeys.slice(0, LIST_MAX_ENTRIES) : allKeys;
+	return { kvKeys, hasMore };
+}
+
+/**
+ * Fetch KV values for an array of keys in sequential batches of LIST_BATCH_SIZE,
+ * avoiding unbounded concurrent requests that could exceed Worker CPU/memory limits.
+ * `mapFn(kvKey, data)` maps each key + parsed JSON value to a response object.
+ */
+async function batchKvFetch(kv, kvKeys, mapFn) {
+	const results = [];
+	for (let i = 0; i < kvKeys.length; i += LIST_BATCH_SIZE) {
+		const batch = kvKeys.slice(i, i + LIST_BATCH_SIZE);
+		const batchResults = await Promise.all(
+			batch.map(async (k) => {
+				const data = await kvGetJson(kv, k.name);
+				return mapFn(k, data);
+			})
+		);
+		results.push(...batchResults);
+	}
+	return results;
 }
 
 /**

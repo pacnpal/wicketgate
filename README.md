@@ -240,9 +240,21 @@ zone_name = "yourdomain.com"
 
 3. Redeploy: `npx wrangler deploy`
 
-### Step 7: Protect the dashboard (optional but recommended)
+### Step 7: Protect the dashboard
 
-If you're using a custom domain, you can put the dashboard behind Cloudflare Access so only you can reach it:
+The dashboard requires authentication. There are two options:
+
+**Option A — ADMIN_SECRET (always required unless using Option B):**
+
+Set an `ADMIN_SECRET` (see [Step 5](#step-5-set-secrets)):
+
+```bash
+npx wrangler secret put ADMIN_SECRET
+```
+
+**Option B — Cloudflare Access (external gate) instead of ADMIN_SECRET:**
+
+If you're using a custom domain, you can put the dashboard behind Cloudflare Access and skip the built-in secret by setting `ALLOW_UNAUTH_ADMIN=true`:
 
 1. Go to Zero Trust → Access → Applications → Add an application
 2. Choose **Self-hosted**
@@ -254,6 +266,7 @@ If you're using a custom domain, you can put the dashboard behind Cloudflare Acc
    - **Action**: Allow
    - **Include**: Emails — `your@email.com`
 5. Save
+6. Set `ALLOW_UNAUTH_ADMIN=true` in your `wrangler.toml` under `[vars]`.
 
 Now `/admin` and `/admin/*` require your Cloudflare login, while `/s/*` stays open for clients.
 
@@ -280,9 +293,12 @@ You need one service token per Access application. If multiple hostnames share a
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ADMIN_SECRET` | No | Enables built-in auth for the dashboard and API. If not set, the dashboard has no built-in auth (use Cloudflare Access or another external gate). |
+| `ADMIN_SECRET` | Yes* | Password for the admin dashboard and API. Required unless `ALLOW_UNAUTH_ADMIN=true` is set. |
+| `ALLOW_UNAUTH_ADMIN` | No | Set to `"true"` to bypass built-in admin auth. **Only use when `/admin*` is protected by an external gate** (e.g., Cloudflare Access). |
 | `CF_API_TOKEN` | No | Cloudflare API token for tunnel discovery. Needs `Account > Cloudflare Tunnel > Read`. |
 | `CF_ACCOUNT_ID` | No | Your Cloudflare account ID. Required alongside `CF_API_TOKEN`. |
+
+\* Required unless `ALLOW_UNAUTH_ADMIN=true` is explicitly set (external-gate mode only).
 
 ### KV namespace
 
@@ -666,21 +682,9 @@ Returns whether built-in auth is enabled. Used by the dashboard to decide whethe
 
 The dashboard and admin API support two modes:
 
-### Mode 1: No built-in auth (external gate)
+### Mode 1: Built-in auth (ADMIN_SECRET) — default
 
-If `ADMIN_SECRET` is **not set**, the dashboard and API have no built-in authentication. The dashboard loads straight into the management view with no login screen.
-
-Use this when the `/admin` path is protected by something external:
-
-- **Cloudflare Access** on `/admin*` (recommended)
-- A reverse proxy with auth in front of the Worker
-- Any other auth layer that gates access before the request reaches the Worker
-
-This is the recommended setup if you're on a custom domain with Cloudflare Access.
-
-### Mode 2: Built-in auth (ADMIN_SECRET)
-
-If `ADMIN_SECRET` **is set**, the dashboard shows a login screen and all API requests must authenticate.
+`ADMIN_SECRET` **must be set** by default. The dashboard shows a login screen and all API requests must authenticate.
 
 The API accepts two auth methods:
 
@@ -697,11 +701,17 @@ curl -u :YOUR_ADMIN_SECRET https://wicketgate.yourdomain.com/admin/keys
 
 If a browser hits an API endpoint without credentials, it gets a `401` with `WWW-Authenticate: Basic` header, triggering the browser's native login prompt.
 
-Use this when:
+### Mode 2: External gate only (ALLOW_UNAUTH_ADMIN)
 
-- You're using the `*.workers.dev` subdomain (can't add Access policies)
-- You want defense-in-depth (Cloudflare Access + admin secret)
-- You don't have Cloudflare Access set up
+If you protect `/admin*` with an external gate (e.g., Cloudflare Access), you can skip the built-in secret by setting `ALLOW_UNAUTH_ADMIN=true`. In this mode, no `ADMIN_SECRET` is needed and the dashboard loads without a login screen.
+
+```toml
+# wrangler.toml — only when /admin* is behind Cloudflare Access
+[vars]
+ALLOW_UNAUTH_ADMIN = "true"
+```
+
+> ⚠️ **Warning:** Setting `ALLOW_UNAUTH_ADMIN=true` without an external auth gate makes the admin API fully public. Anyone can create or revoke keys and origins.
 
 **You can use both.** If you put `/admin*` behind Cloudflare Access AND set `ADMIN_SECRET`, a user must pass both gates. This is the most secure option.
 
