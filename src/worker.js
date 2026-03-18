@@ -26,6 +26,8 @@ const MAX_HOSTNAME_LENGTH = 253;
 const MAX_NAME_LENGTH = 100;
 const MAX_REQUEST_BODY = 8192; // 8KB for admin API bodies
 const KEY_BYTES = 32; // 256-bit entropy
+const LIST_MAX_ENTRIES = 500; // Max entries returned per list call (origins or keys)
+const LIST_BATCH_SIZE = 50;   // KV reads are issued in sequential batches to stay within Worker limits
 
 // Hostnames must be valid DNS: alphanumeric, hyphens, dots, no leading/trailing dots
 const HOSTNAME_RE = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i;
@@ -87,7 +89,11 @@ export default {
 			return new Response(html, {
 				headers: {
 					'Content-Type': 'text/html;charset=UTF-8',
-					'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'`,
+					// style-src requires 'unsafe-inline' because CSP nonces do not apply to
+					// style="" attributes (only to <style> elements), and the dashboard uses
+					// both. The nonce still eliminates unsafe-inline for scripts, which is
+					// the higher-risk surface.
+					'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'`,
 					...SECURITY_HEADERS,
 				},
 			});
@@ -96,7 +102,10 @@ export default {
 		// ── Auth mode check ──
 		if (url.pathname === '/admin/auth-mode') {
 			const authDisabled = env.ALLOW_UNAUTH_ADMIN === 'true';
-			return secureJsonResponse(200, { authRequired: !authDisabled && !!env.ADMIN_SECRET });
+			// authRequired is true unless explicitly opted out via ALLOW_UNAUTH_ADMIN.
+			// Even when ADMIN_SECRET is missing (misconfigured), authRequired=true so the
+			// dashboard shows the login screen; admin calls will return 403 until fixed.
+			return secureJsonResponse(200, { authRequired: !authDisabled });
 		}
 
 		// ── Admin API ──
@@ -323,27 +332,38 @@ function checkAdminAuth(request, secret) {
 // ─── Origin CRUD ────────────────────────────────────────────────────
 
 async function listOrigins(env) {
+	// Collect KV keys up to LIST_MAX_ENTRIES + 1 (the extra entry detects truncation)
 	const allKeys = [];
 	let cursor = undefined;
 	do {
 		const page = await env.WICKETGATE_KV.list({ prefix: 'origin:', cursor });
 		allKeys.push(...page.keys);
 		cursor = page.list_complete ? undefined : page.cursor;
-	} while (cursor);
+	} while (cursor && allKeys.length < LIST_MAX_ENTRIES + 1);
 
-	const origins = await Promise.all(
-		allKeys.map(async (k) => {
-			const data = await kvGetJson(env.WICKETGATE_KV, k.name);
-			return {
-				slug: k.name.replace(/^origin:/, ''),
-				hostname: data?.hostname,
-				label: data?.label,
-				created: data?.created,
-				// Redact all credential fields
-			};
-		})
-	);
-	return adminJsonResponse(200, { origins });
+	const hasMore = allKeys.length > LIST_MAX_ENTRIES;
+	const keys = hasMore ? allKeys.slice(0, LIST_MAX_ENTRIES) : allKeys;
+
+	// Fetch KV values in bounded batches to avoid exceeding Worker CPU/memory limits
+	const origins = [];
+	for (let i = 0; i < keys.length; i += LIST_BATCH_SIZE) {
+		const batch = keys.slice(i, i + LIST_BATCH_SIZE);
+		const batchResults = await Promise.all(
+			batch.map(async (k) => {
+				const data = await kvGetJson(env.WICKETGATE_KV, k.name);
+				return {
+					slug: k.name.replace(/^origin:/, ''),
+					hostname: data?.hostname,
+					label: data?.label,
+					created: data?.created,
+					// Redact all credential fields
+				};
+			})
+		);
+		origins.push(...batchResults);
+	}
+
+	return adminJsonResponse(200, { origins, hasMore });
 }
 
 async function createOrigin(request, env) {
@@ -431,28 +451,39 @@ async function deleteOrigin(slug, env) {
 // ─── Key CRUD ───────────────────────────────────────────────────────
 
 async function listKeys(env) {
+	// Collect KV keys up to LIST_MAX_ENTRIES + 1 (the extra entry detects truncation)
 	const allKeys = [];
 	let cursor = undefined;
 	do {
 		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor });
 		allKeys.push(...page.keys);
 		cursor = page.list_complete ? undefined : page.cursor;
-	} while (cursor);
+	} while (cursor && allKeys.length < LIST_MAX_ENTRIES + 1);
 
-	const results = await Promise.all(
-		allKeys.map(async (k) => {
-			const data = await kvGetJson(env.WICKETGATE_KV, k.name);
-			const fullKey = k.name.replace(/^key:/, '');
-			return {
-				key: fullKey,
-				keyPrefix: fullKey.slice(0, 8) + '...',
-				name: data?.name,
-				origin: data?.origin,
-				created: data?.created,
-			};
-		})
-	);
-	return adminJsonResponse(200, { keys: results });
+	const hasMore = allKeys.length > LIST_MAX_ENTRIES;
+	const keys = hasMore ? allKeys.slice(0, LIST_MAX_ENTRIES) : allKeys;
+
+	// Fetch KV values in bounded batches to avoid exceeding Worker CPU/memory limits
+	const results = [];
+	for (let i = 0; i < keys.length; i += LIST_BATCH_SIZE) {
+		const batch = keys.slice(i, i + LIST_BATCH_SIZE);
+		const batchResults = await Promise.all(
+			batch.map(async (k) => {
+				const data = await kvGetJson(env.WICKETGATE_KV, k.name);
+				const fullKey = k.name.replace(/^key:/, '');
+				return {
+					key: fullKey,
+					keyPrefix: fullKey.slice(0, 8) + '...',
+					name: data?.name,
+					origin: data?.origin,
+					created: data?.created,
+				};
+			})
+		);
+		results.push(...batchResults);
+	}
+
+	return adminJsonResponse(200, { keys: results, hasMore });
 }
 
 async function createKey(request, env) {

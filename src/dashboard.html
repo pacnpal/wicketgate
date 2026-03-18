@@ -293,15 +293,15 @@ details summary:hover{color:var(--text)}
       var res = await api('GET', '/admin/origins');
       if (!res.ok) return false;
       originsCache = res.data.origins || [];
-      renderOrigins(originsCache);
+      renderOrigins(originsCache, res.data.hasMore);
       renderOriginSelect(originsCache);
       return true;
     } catch(e) { return false; }
   }
 
-  function renderOrigins(origins) {
+  function renderOrigins(origins, hasMore) {
     var list = document.getElementById('origin-list');
-    document.getElementById('origin-count').textContent = origins.length;
+    document.getElementById('origin-count').textContent = origins.length + (hasMore ? '+' : '');
     if (origins.length === 0) { list.innerHTML = '<div class="empty">No origins yet. Add one above or use Discover.</div>'; return; }
     list.innerHTML = '';
     origins.forEach(function(o) {
@@ -318,6 +318,13 @@ details summary:hover{color:var(--text)}
       card.appendChild(header);
       list.appendChild(card);
     });
+    if (hasMore) {
+      var notice = document.createElement('div');
+      notice.className = 'card';
+      notice.style.cssText = 'color:var(--warn);font-size:12px;text-align:center';
+      notice.textContent = 'Showing first ' + origins.length + ' origins. Use the API to manage the rest.';
+      list.appendChild(notice);
+    }
   }
 
   function renderOriginSelect(origins) {
@@ -372,13 +379,13 @@ details summary:hover{color:var(--text)}
     try {
       var res = await api('GET', '/admin/keys');
       if (!res.ok) return;
-      renderKeys(res.data.keys || []);
+      renderKeys(res.data.keys || [], res.data.hasMore);
     } catch(e) {}
   }
 
-  function renderKeys(keys) {
+  function renderKeys(keys, hasMore) {
     var list = document.getElementById('key-list');
-    document.getElementById('key-count').textContent = keys.length;
+    document.getElementById('key-count').textContent = keys.length + (hasMore ? '+' : '');
     if (keys.length === 0) { list.innerHTML = '<div class="empty">No access keys yet. Create one above.</div>'; return; }
     list.innerHTML = '';
     keys.forEach(function(k) {
@@ -412,6 +419,13 @@ details summary:hover{color:var(--text)}
       card.appendChild(actions);
       list.appendChild(card);
     });
+    if (hasMore) {
+      var notice = document.createElement('div');
+      notice.className = 'card';
+      notice.style.cssText = 'color:var(--warn);font-size:12px;text-align:center';
+      notice.textContent = 'Showing first ' + keys.length + ' keys. Use the API to manage the rest.';
+      list.appendChild(notice);
+    }
   }
 
   document.getElementById('create-key-btn').addEventListener('click', async function() {
