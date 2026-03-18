@@ -29,6 +29,9 @@ const KEY_BYTES = 32; // 256-bit entropy
 // Hostnames must be valid DNS: alphanumeric, hyphens, dots, no leading/trailing dots
 const HOSTNAME_RE = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i;
 
+// Slug format: lowercase alphanumeric with hyphens, 1–48 chars
+const SLUG_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+
 // Security headers applied to all responses
 const SECURITY_HEADERS = {
 	'X-Content-Type-Options': 'nosniff',
@@ -312,16 +315,8 @@ async function createOrigin(request, env) {
 		return secureJsonError(400, 'Slug must be lowercase alphanumeric with hyphens.');
 
 	// Validate hostname — must look like a real public DNS name
-	if (typeof hostname !== 'string' || hostname.length > MAX_HOSTNAME_LENGTH)
-		return secureJsonError(400, 'Invalid hostname.');
-	if (!HOSTNAME_RE.test(hostname))
-		return secureJsonError(400, 'Hostname must be a valid public DNS name (e.g. app.yourdomain.com).');
-	// Block internal/reserved hostnames
-	const lowerHost = hostname.toLowerCase();
-	if (lowerHost === 'localhost' || lowerHost.endsWith('.local') || lowerHost.endsWith('.internal') ||
-	    lowerHost.endsWith('.localhost') || lowerHost.startsWith('10.') || lowerHost.startsWith('192.168.') ||
-	    lowerHost.startsWith('172.') || lowerHost.startsWith('127.'))
-		return secureJsonError(400, 'Hostname must be a public DNS name, not an internal address.');
+	const hostnameError = validateHostname(hostname);
+	if (hostnameError) return secureJsonError(400, hostnameError);
 
 	// Validate label
 	if (label && (typeof label !== 'string' || label.length > MAX_LABEL_LENGTH))
@@ -354,11 +349,8 @@ async function updateOrigin(slug, request, env) {
 	const updated = { ...existing };
 
 	if (body.hostname) {
-		if (typeof body.hostname !== 'string' || body.hostname.length > MAX_HOSTNAME_LENGTH || !HOSTNAME_RE.test(body.hostname))
-			return secureJsonError(400, 'Invalid hostname.');
-		const lh = body.hostname.toLowerCase();
-		if (lh === 'localhost' || lh.endsWith('.local') || lh.endsWith('.internal') || lh.endsWith('.localhost'))
-			return secureJsonError(400, 'Hostname must be a public DNS name.');
+		const hostnameError = validateHostname(body.hostname);
+		if (hostnameError) return secureJsonError(400, hostnameError);
 		updated.hostname = body.hostname;
 	}
 	if (body.serviceTokenId) {
@@ -418,6 +410,9 @@ async function createKey(request, env) {
 
 	if (!origin || typeof origin !== 'string')
 		return secureJsonError(400, 'Required: origin (slug).');
+
+	if (origin.length > MAX_SLUG_LENGTH || !SLUG_RE.test(origin))
+		return secureJsonError(400, 'Origin must be a valid slug (lowercase alphanumeric with hyphens).');
 
 	if (!(await env.WICKETGATE_KV.get(`origin:${origin}`)))
 		return secureJsonError(400, 'Origin does not exist.');
@@ -508,18 +503,59 @@ async function kvGetJson(kv, key) {
 }
 
 /**
+ * Validate a hostname for use as an origin.
+ * Returns an error message string on failure, or null if valid.
+ * Rejects invalid DNS syntax, reserved TLDs, and localhost variants.
+ * IP address literals are already rejected by HOSTNAME_RE (no valid TLD).
+ */
+function validateHostname(hostname) {
+	if (typeof hostname !== 'string' || hostname.length > MAX_HOSTNAME_LENGTH)
+		return 'Invalid hostname.';
+	if (!HOSTNAME_RE.test(hostname))
+		return 'Hostname must be a valid public DNS name (e.g. app.yourdomain.com).';
+	const lh = hostname.toLowerCase();
+	if (lh === 'localhost' || lh.endsWith('.local') || lh.endsWith('.internal') || lh.endsWith('.localhost'))
+		return 'Hostname must be a public DNS name, not an internal address.';
+	return null;
+}
+
+/**
  * Parse JSON from request body with a size limit.
+ * Reads the body incrementally and aborts as soon as maxBytes is exceeded.
  * Returns null if body is too large, invalid JSON, or missing.
  */
 async function safeLimitedJson(request, maxBytes) {
 	try {
-		const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
-		if (contentLength > maxBytes) return null;
+		const clHeader = request.headers.get('Content-Length');
+		if (clHeader !== null) {
+			const contentLength = parseInt(clHeader, 10);
+			if (isNaN(contentLength) || contentLength > maxBytes) return null;
+		}
 
-		// Read body as text with a size guard
-		const text = await request.text();
-		if (text.length > maxBytes) return null;
+		if (!request.body) return null;
 
+		// Read body incrementally, aborting early if limit is exceeded
+		const reader = request.body.getReader();
+		const chunks = [];
+		let totalBytes = 0;
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			totalBytes += value.byteLength;
+			if (totalBytes > maxBytes) {
+				reader.cancel();
+				return null;
+			}
+			chunks.push(value);
+		}
+
+		const combined = new Uint8Array(totalBytes);
+		let offset = 0;
+		for (const chunk of chunks) {
+			combined.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		const text = new TextDecoder().decode(combined);
 		return JSON.parse(text);
 	} catch { return null; }
 }
