@@ -514,13 +514,42 @@ async function discoverTunnels(env) {
 	if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID)
 		return secureJsonError(500, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID.');
 
+async function discoverTunnels(env) {
+	if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID)
+		return secureJsonError(500, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID.');
+
 	try {
-		const tunnelsRes = await fetch(
-			`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false`,
-			{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` } }
-		);
-		const tunnelsData = await tunnelsRes.json();
-		if (!tunnelsData.success)
+		// Fetch all pages of tunnels
+		let tunnels = [];
+		let page = 1;
+		const perPage = 50;
+
+		while (true) {
+			const tunnelsRes = await fetch(
+				`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
+				{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` } }
+			);
+			const tunnelsData = await tunnelsRes.json();
+			if (!tunnelsData.success)
+				return secureJsonError(502, 'Tunnel API error.');
+
+			const batch = tunnelsData.result || [];
+			tunnels = tunnels.concat(batch);
+
+			// Check if there are more pages using result_info
+			const resultInfo = tunnelsData.result_info || {};
+			const hasMore = resultInfo.total_pages && page < resultInfo.total_pages;
+
+			if (!hasMore || batch.length === 0) break;
+
+			page++;
+
+			// Safety limit to prevent infinite loops (max 5000 tunnels)
+			if (page > 100) break;
+		}
+
+		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
+		// and keep Wall-clock time predictable.
 			return secureJsonError(502, 'Tunnel API error.');
 
 		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
