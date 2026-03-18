@@ -322,7 +322,7 @@ details summary:hover{color:var(--text)}
       var notice = document.createElement('div');
       notice.className = 'card';
       notice.style.cssText = 'color:var(--warn);font-size:12px;text-align:center';
-      notice.textContent = 'Showing first ' + origins.length + ' origins. Use the API to manage the rest.';
+      notice.textContent = 'Showing first ' + origins.length + ' origins. To manage additional origins, use the Cloudflare KV dashboard or wrangler CLI.';
       list.appendChild(notice);
     }
   }
@@ -423,7 +423,7 @@ details summary:hover{color:var(--text)}
       var notice = document.createElement('div');
       notice.className = 'card';
       notice.style.cssText = 'color:var(--warn);font-size:12px;text-align:center';
-      notice.textContent = 'Showing first ' + keys.length + ' keys. Use the API to manage the rest.';
+      notice.textContent = 'Showing first ' + keys.length + ' keys. To manage additional keys, use the Cloudflare KV dashboard or wrangler CLI.';
       list.appendChild(notice);
     }
   }
