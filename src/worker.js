@@ -28,7 +28,9 @@ const MAX_REQUEST_BODY = 8192; // 8KB for admin API bodies
 const KEY_BYTES = 32; // 256-bit entropy
 const LIST_MAX_ENTRIES = 500; // Max entries returned per list call (origins or keys)
 const LIST_BATCH_SIZE = 50;   // KV reads are issued in sequential batches to stay within Worker limits
-const DELETE_MAX_PAGES = 200; // Max KV pages scanned per deleteOrigin call (200 × 500 = 100,000 keys)
+const DELETE_MAX_PAGES = 20;  // Max KV pages scanned per deleteOrigin call (20 × 500 = 10,000 keys).
+                               // Keeps free-tier workers well inside the 30 s wall-clock limit.
+                               // Large namespaces are handled via resumeCursor retries.
 const TUNNEL_FETCH_CONCURRENCY = 5; // Max parallel Cloudflare API requests during tunnel discovery
 const PROXY_TIMEOUT_MS = 25_000;   // Abort upstream proxy fetch after 25 s (Worker CPU limit is 30 s)
 const DISCOVER_TIMEOUT_MS = 10_000; // Per-request timeout for Cloudflare API calls during discovery
@@ -327,7 +329,7 @@ async function handleAdmin(request, url, env) {
 		const slug = oMatch[1];
 		if (slug.length > MAX_SLUG_LENGTH || !SLUG_RE.test(slug))
 			return secureJsonError(404, 'Not found.');
-		if (request.method === 'DELETE') return deleteOrigin(slug, env);
+		if (request.method === 'DELETE') return deleteOrigin(slug, request, env);
 		if (request.method === 'PUT') return updateOrigin(slug, request, env);
 	}
 
@@ -487,9 +489,23 @@ async function updateOrigin(slug, request, env) {
 	return adminJsonResponse(200, { slug, message: 'Updated.' });
 }
 
-async function deleteOrigin(slug, env) {
+async function deleteOrigin(slug, request, env) {
 	if (!(await env.WICKETGATE_KV.get(`origin:${slug}`)))
 		return secureJsonError(404, 'Not found.');
+
+	// Accept an optional resumeCursor from the request body so the caller can
+	// resume a previously truncated scan rather than always restarting from page 1.
+	// This ensures forward progress when the namespace is very large.
+	let cursor;
+	const contentType = request.headers.get('content-type') || '';
+	if (contentType === 'application/json' || contentType.startsWith('application/json;')) {
+		try {
+			const body = await request.json();
+			// Validate: cursor must be a non-empty string (opaque KV pagination token)
+			if (typeof body?.resumeCursor === 'string' && body.resumeCursor.length > 0)
+				cursor = body.resumeCursor;
+		} catch { /* no body or invalid JSON — start from beginning */ }
+	}
 
 	// Scan every page of keys and delete matching ones immediately, page-by-page.
 	// This avoids accumulating an unbounded list of key names in memory for large
@@ -497,11 +513,11 @@ async function deleteOrigin(slug, env) {
 	// to keep concurrent KV operations predictable.
 	// DELETE_MAX_PAGES caps the total pages scanned to prevent exceeding the Worker's
 	// CPU/wall-clock time limit (30 s free / 15 min paid). If the namespace is larger
-	// than DELETE_MAX_PAGES × LIST_MAX_ENTRIES keys, the caller should retry — the
-	// origin entry is deleted last so retries are safe.
+	// than DELETE_MAX_PAGES × LIST_MAX_ENTRIES keys, the caller should retry with the
+	// returned resumeCursor so the scan resumes from where it stopped rather than
+	// restarting from page 1 — origin entry is deleted last so retries are safe.
 	let keysDeleted = 0;
 	let pagesScanned = 0;
-	let cursor = undefined;
 	let truncated = false;
 	do {
 		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: LIST_MAX_ENTRIES });
@@ -531,16 +547,17 @@ async function deleteOrigin(slug, env) {
 	// origin first would create orphaned keys that could silently resurrect if a new
 	// origin were created with the same slug.
 	// If the scan was truncated (namespace too large), skip deleting the origin so
-	// the caller can safely retry — the next call will resume from the beginning,
-	// deleting more keys until they are exhausted and the origin can be removed.
+	// the caller can safely retry with the returned resumeCursor — the next call will
+	// resume from where this one stopped rather than rescanning from page 1.
 	if (truncated) {
 		return adminJsonResponse(202, {
-			message: 'Partial delete: namespace too large for a single request. Retry to continue.',
+			message: 'Partial delete: namespace too large for a single request. Retry with resumeCursor to continue.',
 			keysDeleted,
 			completed: false,
 			originDeleted: false,
 			truncated: true,
 			pagesScanned,
+			resumeCursor: cursor,
 		});
 	}
 
@@ -621,12 +638,20 @@ async function discoverTunnels(env) {
 		while (true) {
 			const tunnelAbort = new AbortController();
 			const tunnelTimer = setTimeout(() => tunnelAbort.abort(), DISCOVER_TIMEOUT_MS);
-			let tunnelsRes;
+			let tunnelsData;
 			try {
-				tunnelsRes = await fetch(
+				const tunnelsRes = await fetch(
 					`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
 					{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: tunnelAbort.signal }
 				);
+				if (!tunnelsRes.ok) {
+					if (tunnelsRes.status === 429)
+						return secureJsonError(502, 'Tunnel API rate limit reached. Try again later.');
+					return secureJsonError(502, `Tunnel API error (HTTP ${tunnelsRes.status}).`);
+				}
+				// Parse the body inside the try block so the abort signal covers body delivery,
+				// not just time-to-first-byte.
+				tunnelsData = await tunnelsRes.json();
 			} catch (fetchErr) {
 				if (fetchErr?.name === 'AbortError')
 					return secureJsonError(502, 'Tunnel API timed out. Try again later.');
@@ -635,13 +660,6 @@ async function discoverTunnels(env) {
 				clearTimeout(tunnelTimer);
 			}
 
-			if (!tunnelsRes.ok) {
-				if (tunnelsRes.status === 429)
-					return secureJsonError(502, 'Tunnel API rate limit reached. Try again later.');
-				return secureJsonError(502, `Tunnel API error (HTTP ${tunnelsRes.status}).`);
-			}
-
-			const tunnelsData = await tunnelsRes.json();
 			if (!tunnelsData.success)
 				return secureJsonError(502, 'Tunnel API error.');
 
@@ -672,20 +690,22 @@ async function discoverTunnels(env) {
 					try {
 						const cfgAbort = new AbortController();
 						const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
-						let cfgRes;
+						let cfgData;
 						try {
-							cfgRes = await fetch(
+							const cfgRes = await fetch(
 								`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
 								{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: cfgAbort.signal }
 							);
+							if (!cfgRes.ok) {
+								warnings.push(`Tunnel "${tunnel.name}" config fetch failed (HTTP ${cfgRes.status}).`);
+								return;
+							}
+							// Parse the body inside the try block so the abort signal covers body delivery,
+							// not just time-to-first-byte.
+							cfgData = await cfgRes.json();
 						} finally {
 							clearTimeout(cfgTimer);
 						}
-						if (!cfgRes.ok) {
-							warnings.push(`Tunnel "${tunnel.name}" config fetch failed (HTTP ${cfgRes.status}).`);
-							return;
-						}
-						const cfgData = await cfgRes.json();
 						if (cfgData.success && cfgData.result?.config?.ingress) {
 							for (const rule of cfgData.result.config.ingress) {
 								if (rule.hostname) {
