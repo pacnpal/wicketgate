@@ -701,8 +701,13 @@ async function discoverTunnels(env) {
 							warnings.push(`Tunnel "${tunnel.name}" returned an API error.`);
 						}
 					} catch (err) {
-						const message = err instanceof Error ? err.message : String(err);
-						warnings.push(`Tunnel "${tunnel.name}" config fetch failed due to an exception: ${message}`);
+						let msg;
+						if (err?.name === 'AbortError') {
+							msg = `Tunnel "${tunnel.name}" config fetch timed out.`;
+						} else {
+							msg = `Tunnel "${tunnel.name}" config fetch failed due to an exception: ${err instanceof Error ? err.message : String(err)}`;
+						}
+						warnings.push(msg);
 					}
 				})
 			);
