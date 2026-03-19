@@ -507,7 +507,11 @@ async function deleteOrigin(slug, env) {
 
 	// Delete origin and associated keys
 	await env.WICKETGATE_KV.delete(`origin:${slug}`);
-	await Promise.all(keysToDelete.map(k => env.WICKETGATE_KV.delete(k)));
+	// Delete associated keys in bounded batches to avoid excessive concurrency
+	for (let i = 0; i < keysToDelete.length; i += LIST_BATCH_SIZE) {
+		const batch = keysToDelete.slice(i, i + LIST_BATCH_SIZE);
+		await Promise.all(batch.map(k => env.WICKETGATE_KV.delete(k)));
+	}
 
 	return adminJsonResponse(200, {
 		message: 'Deleted.',
