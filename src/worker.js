@@ -520,7 +520,9 @@ async function deleteOrigin(slug, request, env) {
 	let keysDeleted = 0;
 	let pagesScanned = 0;
 	let truncated = false;
-	do {
+	let keysDeleted = 0;
+	let pagesScanned = 0;
+	let truncated = false;
 	let page;
 	do {
 		try {
