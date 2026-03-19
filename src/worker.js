@@ -96,9 +96,9 @@ export default {
 			const nonce = btoa(String.fromCharCode(...nonceBytes));
 
 			// Inject nonce into inline <style> and <script> tags
-		const html = DASHBOARD_HTML
-			.replace(/(<style)(?=[>\s])/gi, `<style nonce="${nonce}"`)
-			.replace(/(<script)(?=[>\s])/gi, `<script nonce="${nonce}"`);
+			const html = DASHBOARD_HTML
+				.replace(/(<style)(?=[>\s])/gi, `<style nonce="${nonce}"`)
+				.replace(/(<script)(?=[>\s])/gi, `<script nonce="${nonce}"`);
 
 			return new Response(html, {
 				headers: {
