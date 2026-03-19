@@ -698,9 +698,14 @@ async function discoverTunnels(env) {
 				const batch = tunnelsData.result || [];
 				tunnels = tunnels.concat(batch);
 
-				// Check if there are more pages using result_info
+				// Check if there are more pages using result_info.
+				// Fall back to batch.length > 0 when total_pages is absent so the loop
+				// does not stop after the first page on non-paginated responses or if the
+				// CF API omits result_info entirely (e.g., an API version change).
 				const resultInfo = tunnelsData.result_info || {};
-				const hasMore = resultInfo.total_pages && page < resultInfo.total_pages;
+				const hasMore = typeof resultInfo.total_pages === 'number'
+					? page < resultInfo.total_pages
+					: batch.length > 0;
 
 				if (!hasMore || batch.length === 0) break;
 
@@ -716,56 +721,74 @@ async function discoverTunnels(env) {
 		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
 		// and keep Wall-clock time predictable. Per-tunnel failures are tolerated and
 		// noted in the warnings list so the caller knows the result may be incomplete.
+		//
+		// Guard the entire config-fetch phase with an outer shared AbortController so
+		// that if all fetches in a batch saturate their per-tunnel DISCOVER_TIMEOUT_MS
+		// budget, sequential batches do not accumulate beyond the Worker wall-clock
+		// limit (~30 s). Budget: 2× DISCOVER_TIMEOUT_MS (20 s) leaves headroom for two
+		// full worst-case batches; remaining tunnels are skipped and added to warnings.
 		const hostnames = [];
 		const warnings = [];
-		for (let i = 0; i < tunnels.length; i += TUNNEL_FETCH_CONCURRENCY) {
-			const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
-			await Promise.allSettled(
-				batch.map(async (tunnel) => {
-					try {
-						const cfgAbort = new AbortController();
-						const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
+		const cfgPhaseAbort = new AbortController();
+		const cfgPhaseTimer = setTimeout(() => cfgPhaseAbort.abort(), DISCOVER_TIMEOUT_MS * 2);
+		try {
+			for (let i = 0; i < tunnels.length; i += TUNNEL_FETCH_CONCURRENCY) {
+				// If the phase budget is exhausted, skip remaining batches and record a warning
+				if (cfgPhaseAbort.signal.aborted) {
+					const remaining = tunnels.length - i;
+					warnings.push(`Config-fetch phase budget exhausted; ${remaining} tunnel(s) not fetched.`);
+					break;
+				}
+				const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
+				await Promise.allSettled(
+					batch.map(async (tunnel) => {
 						try {
-							const cfgRes = await fetch(
-								`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
-								{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: cfgAbort.signal }
-							);
-							if (!cfgRes.ok) {
-								warnings.push(`Tunnel "${tunnel.name}" config fetch failed (HTTP ${cfgRes.status}).`);
-								return;
-							}
-							// Parse the body inside the try block so the abort signal covers body delivery,
-							// not just time-to-first-byte.
-							const cfgData = await cfgRes.json();
-							if (cfgData.success && cfgData.result?.config?.ingress) {
-								for (const rule of cfgData.result.config.ingress) {
-									if (rule.hostname) {
-										hostnames.push({
-											hostname: rule.hostname,
-											tunnelName: tunnel.name,
-											// Intentionally omit rule.service — it exposes internal network topology
-											suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
-										});
-									}
+							const cfgAbort = new AbortController();
+							const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
+							try {
+								const cfgRes = await fetch(
+									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
+									{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: cfgAbort.signal }
+								);
+								if (!cfgRes.ok) {
+									warnings.push(`Tunnel "${tunnel.name}" config fetch failed (HTTP ${cfgRes.status}).`);
+									return;
 								}
-							} else if (!cfgData.success) {
-								warnings.push(`Tunnel "${tunnel.name}" returned an API error.`);
+								// Parse the body inside the try block so the abort signal covers body delivery,
+								// not just time-to-first-byte.
+								const cfgData = await cfgRes.json();
+								if (cfgData.success && cfgData.result?.config?.ingress) {
+									for (const rule of cfgData.result.config.ingress) {
+										if (rule.hostname) {
+											hostnames.push({
+												hostname: rule.hostname,
+												tunnelName: tunnel.name,
+												// Intentionally omit rule.service — it exposes internal network topology
+												suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
+											});
+										}
+									}
+								} else if (!cfgData.success) {
+									warnings.push(`Tunnel "${tunnel.name}" returned an API error.`);
+								}
+							} finally {
+								clearTimeout(cfgTimer);
 							}
-						} finally {
-							clearTimeout(cfgTimer);
+						} catch (err) {
+							let msg;
+							if (err?.name === 'AbortError') {
+								msg = `Tunnel "${tunnel.name}" config fetch timed out.`;
+							} else {
+								msg = `Tunnel "${tunnel.name}" config fetch failed due to an exception: ${err instanceof Error ? err.message : String(err)}`;
+							}
+							warnings.push(msg);
 						}
-					} catch (err) {
-						let msg;
-						if (err?.name === 'AbortError') {
-							msg = `Tunnel "${tunnel.name}" config fetch timed out.`;
-						} else {
-							msg = `Tunnel "${tunnel.name}" config fetch failed due to an exception: ${err instanceof Error ? err.message : String(err)}`;
-						}
-						warnings.push(msg);
-					}
-				})
-			);
-			// Per-tunnel failures are recorded in warnings; the tunnel is omitted from results
+					})
+				);
+				// Per-tunnel failures are recorded in warnings; the tunnel is omitted from results
+			}
+		} finally {
+			clearTimeout(cfgPhaseTimer);
 		}
 
 		// If no hostnames were discovered, there's nothing to check against KV.
