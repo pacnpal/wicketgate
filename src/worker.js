@@ -537,6 +537,10 @@ async function deleteOrigin(slug, env) {
 		return adminJsonResponse(202, {
 			message: 'Partial delete: namespace too large for a single request. Retry to continue.',
 			keysDeleted,
+			completed: false,
+			originDeleted: false,
+			truncated: true,
+			pagesScanned,
 		});
 	}
 
@@ -545,6 +549,10 @@ async function deleteOrigin(slug, env) {
 	return adminJsonResponse(200, {
 		message: 'Deleted.',
 		keysDeleted,
+		completed: true,
+		originDeleted: true,
+		truncated: false,
+		pagesScanned,
 	});
 }
 
