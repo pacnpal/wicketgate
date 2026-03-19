@@ -521,7 +521,8 @@ async function deleteOrigin(slug, request, env) {
 	let pagesScanned = 0;
 	let truncated = false;
 	do {
-		let page;
+	let page;
+	do {
 		try {
 			page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: LIST_MAX_ENTRIES });
 		} catch (err) {
