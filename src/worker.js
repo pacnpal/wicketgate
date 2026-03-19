@@ -549,7 +549,7 @@ async function deleteOrigin(slug, request, env) {
 			return secureJsonError(500, 'KV operation failed.');
 		}
 		pagesScanned++;
-		cursor = page.list_complete ? undefined : page.cursor;
+		cursor = page.list_complete ? undefined : (page.cursor || undefined);
 		if (!page.list_complete && pagesScanned >= DELETE_MAX_PAGES) {
 			truncated = true;
 			break;
@@ -652,52 +652,57 @@ async function discoverTunnels(env) {
 		return secureJsonError(500, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID.');
 
 	try {
-		// Fetch all pages of tunnels (with per-request timeout)
+		// Fetch all pages of tunnels. A single AbortController is shared across all
+		// pages of the tunnel-list loop so the budget timer covers the entire phase.
+		// Per-page controllers would allow N × DISCOVER_TIMEOUT_MS cumulative worst-case
+		// which can silently exceed the Worker's 30 s wall-clock limit.
 		let tunnels = [];
 		let page = 1;
 		const perPage = 50;
+		const tunnelAbort = new AbortController();
+		const tunnelTimer = setTimeout(() => tunnelAbort.abort(), DISCOVER_TIMEOUT_MS);
 
-		while (true) {
-			const tunnelAbort = new AbortController();
-			const tunnelTimer = setTimeout(() => tunnelAbort.abort(), DISCOVER_TIMEOUT_MS);
-			let tunnelsData;
-			try {
-				const tunnelsRes = await fetch(
-					`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
-					{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: tunnelAbort.signal }
-				);
-				if (!tunnelsRes.ok) {
-					if (tunnelsRes.status === 429)
-						return secureJsonError(502, 'Tunnel API rate limit reached. Try again later.');
-					return secureJsonError(502, `Tunnel API error (HTTP ${tunnelsRes.status}).`);
+		try {
+			while (true) {
+				let tunnelsData;
+				try {
+					const tunnelsRes = await fetch(
+						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
+						{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: tunnelAbort.signal }
+					);
+					if (!tunnelsRes.ok) {
+						if (tunnelsRes.status === 429)
+							return secureJsonError(502, 'Tunnel API rate limit reached. Try again later.');
+						return secureJsonError(502, `Tunnel API error (HTTP ${tunnelsRes.status}).`);
+					}
+					// Parse the body inside the try block so the abort signal covers body delivery,
+					// not just time-to-first-byte.
+					tunnelsData = await tunnelsRes.json();
+				} catch (fetchErr) {
+					if (fetchErr?.name === 'AbortError')
+						return secureJsonError(502, 'Tunnel API timed out. Try again later.');
+					throw fetchErr;
 				}
-				// Parse the body inside the try block so the abort signal covers body delivery,
-				// not just time-to-first-byte.
-				tunnelsData = await tunnelsRes.json();
-			} catch (fetchErr) {
-				if (fetchErr?.name === 'AbortError')
-					return secureJsonError(502, 'Tunnel API timed out. Try again later.');
-				throw fetchErr;
-			} finally {
-				clearTimeout(tunnelTimer);
+
+				if (!tunnelsData.success)
+					return secureJsonError(502, 'Tunnel API error.');
+
+				const batch = tunnelsData.result || [];
+				tunnels = tunnels.concat(batch);
+
+				// Check if there are more pages using result_info
+				const resultInfo = tunnelsData.result_info || {};
+				const hasMore = resultInfo.total_pages && page < resultInfo.total_pages;
+
+				if (!hasMore || batch.length === 0) break;
+
+				page++;
+
+				// Safety limit to prevent infinite loops (max 5000 tunnels)
+				if (page > 100) break;
 			}
-
-			if (!tunnelsData.success)
-				return secureJsonError(502, 'Tunnel API error.');
-
-			const batch = tunnelsData.result || [];
-			tunnels = tunnels.concat(batch);
-
-			// Check if there are more pages using result_info
-			const resultInfo = tunnelsData.result_info || {};
-			const hasMore = resultInfo.total_pages && page < resultInfo.total_pages;
-
-			if (!hasMore || batch.length === 0) break;
-
-			page++;
-
-			// Safety limit to prevent infinite loops (max 5000 tunnels)
-			if (page > 100) break;
+		} finally {
+			clearTimeout(tunnelTimer);
 		}
 
 		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
