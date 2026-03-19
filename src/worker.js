@@ -624,35 +624,40 @@ async function discoverTunnels(env) {
 			const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
 			await Promise.allSettled(
 				batch.map(async (tunnel) => {
-					const cfgAbort = new AbortController();
-					const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
-					let cfgRes;
 					try {
-						cfgRes = await fetch(
-							`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
-							{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: cfgAbort.signal }
-						);
-					} finally {
-						clearTimeout(cfgTimer);
-					}
-					if (!cfgRes.ok) {
-						warnings.push(`Tunnel "${tunnel.name}" config fetch failed (HTTP ${cfgRes.status}).`);
-						return;
-					}
-					const cfgData = await cfgRes.json();
-					if (cfgData.success && cfgData.result?.config?.ingress) {
-						for (const rule of cfgData.result.config.ingress) {
-							if (rule.hostname) {
-								hostnames.push({
-									hostname: rule.hostname,
-									tunnelName: tunnel.name,
-									// Intentionally omit rule.service — it exposes internal network topology
-									suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
-								});
-							}
+						const cfgAbort = new AbortController();
+						const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
+						let cfgRes;
+						try {
+							cfgRes = await fetch(
+								`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
+								{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: cfgAbort.signal }
+							);
+						} finally {
+							clearTimeout(cfgTimer);
 						}
-					} else if (!cfgData.success) {
-						warnings.push(`Tunnel "${tunnel.name}" returned an API error.`);
+						if (!cfgRes.ok) {
+							warnings.push(`Tunnel "${tunnel.name}" config fetch failed (HTTP ${cfgRes.status}).`);
+							return;
+						}
+						const cfgData = await cfgRes.json();
+						if (cfgData.success && cfgData.result?.config?.ingress) {
+							for (const rule of cfgData.result.config.ingress) {
+								if (rule.hostname) {
+									hostnames.push({
+										hostname: rule.hostname,
+										tunnelName: tunnel.name,
+										// Intentionally omit rule.service — it exposes internal network topology
+										suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
+									});
+								}
+							}
+						} else if (!cfgData.success) {
+							warnings.push(`Tunnel "${tunnel.name}" returned an API error.`);
+						}
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						warnings.push(`Tunnel "${tunnel.name}" config fetch failed due to an exception: ${message}`);
 					}
 				})
 			);
