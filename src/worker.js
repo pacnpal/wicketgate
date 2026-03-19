@@ -576,7 +576,14 @@ async function deleteOrigin(slug, request, env) {
 		});
 	}
 
-	await env.WICKETGATE_KV.delete(`origin:${slug}`);
+	try {
+		await env.WICKETGATE_KV.delete(`origin:${slug}`);
+	} catch {
+		// Transient KV error on the final origin entry removal. Return 500 so the
+		// caller gets a clean JSON error rather than a platform-level crash.
+		// The origin entry still exists, so the caller can retry the full delete.
+		return secureJsonError(500, 'Failed to delete origin entry.');
+	}
 
 	return adminJsonResponse(200, {
 		message: 'Deleted.',
