@@ -286,6 +286,8 @@ async function handleProxy(request, url, env) {
 			headers: responseHeaders,
 		});
 	} catch (err) {
+		if (err?.name === 'AbortError')
+			return secureJsonError(504, 'Gateway timeout.');
 		return secureJsonError(502, 'Service unavailable.');
 	} finally {
 		// Always clear the abort timer regardless of outcome — covers the success path,
@@ -519,7 +521,15 @@ async function deleteOrigin(slug, request, env) {
 	let pagesScanned = 0;
 	let truncated = false;
 	do {
-		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: LIST_MAX_ENTRIES });
+		let page;
+		try {
+			page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: LIST_MAX_ENTRIES });
+		} catch (err) {
+			// kv.list() throws on an invalid or expired cursor (e.g., a tampered resumeCursor
+			// from the request body). Return a 400 so the caller gets a clean JSON error
+			// rather than an unhandled exception that would surface as a platform-level crash.
+			return secureJsonError(400, 'Invalid resumeCursor.');
+		}
 		const keyData = await batchKvFetch(env.WICKETGATE_KV, page.keys, (k, data) => ({
 			name: k.name,
 			origin: data?.origin,
@@ -534,11 +544,11 @@ async function deleteOrigin(slug, request, env) {
 		keysDeleted += pageKeysToDelete.length;
 		pagesScanned++;
 		cursor = page.list_complete ? undefined : page.cursor;
-		if (cursor && pagesScanned >= DELETE_MAX_PAGES) {
+		if (!page.list_complete && pagesScanned >= DELETE_MAX_PAGES) {
 			truncated = true;
 			break;
 		}
-	} while (cursor);
+	} while (!page.list_complete);
 
 	// Delete the origin entry itself last (after all associated keys are removed).
 	// This ordering is intentional: if the operation is interrupted before this line,
