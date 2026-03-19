@@ -28,6 +28,7 @@ const MAX_REQUEST_BODY = 8192; // 8KB for admin API bodies
 const KEY_BYTES = 32; // 256-bit entropy
 const LIST_MAX_ENTRIES = 500; // Max entries returned per list call (origins or keys)
 const LIST_BATCH_SIZE = 50;   // KV reads are issued in sequential batches to stay within Worker limits
+const DELETE_MAX_PAGES = 200; // Max KV pages scanned per deleteOrigin call (200 × 500 = 100,000 keys)
 const TUNNEL_FETCH_CONCURRENCY = 5; // Max parallel Cloudflare API requests during tunnel discovery
 const PROXY_TIMEOUT_MS = 25_000;   // Abort upstream proxy fetch after 25 s (Worker CPU limit is 30 s)
 const DISCOVER_TIMEOUT_MS = 10_000; // Per-request timeout for Cloudflare API calls during discovery
@@ -273,6 +274,10 @@ async function handleProxy(request, url, env) {
 		// Use PROXY_SECURITY_HEADERS (not the full SECURITY_HEADERS) to avoid
 		// stamping X-Frame-Options: DENY / Permissions-Policy onto proxied responses
 		// that may belong to browser-based services (media UIs, dashboards, etc.).
+		// These headers intentionally enforce the proxy's security policy regardless
+		// of what the origin sent — Referrer-Policy and X-Robots-Tag are always
+		// set to the proxy's values to prevent referrer leakage and indexing of
+		// proxy URLs, even if the origin intended different values.
 		Object.entries(proxyCorsHeaders()).forEach(([k, v]) => responseHeaders.set(k, v));
 		Object.entries(PROXY_SECURITY_HEADERS).forEach(([k, v]) => responseHeaders.set(k, v));
 		// Keys can be revoked at any time; prevent caching to avoid stale access
@@ -490,8 +495,14 @@ async function deleteOrigin(slug, env) {
 	// This avoids accumulating an unbounded list of key names in memory for large
 	// namespaces. Per-page deletes are issued in bounded batches (LIST_BATCH_SIZE)
 	// to keep concurrent KV operations predictable.
+	// DELETE_MAX_PAGES caps the total pages scanned to prevent exceeding the Worker's
+	// CPU/wall-clock time limit (30 s free / 15 min paid). If the namespace is larger
+	// than DELETE_MAX_PAGES × LIST_MAX_ENTRIES keys, the caller should retry — the
+	// origin entry is deleted last so retries are safe.
 	let keysDeleted = 0;
+	let pagesScanned = 0;
 	let cursor = undefined;
+	let truncated = false;
 	do {
 		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: LIST_MAX_ENTRIES });
 		const keyData = await batchKvFetch(env.WICKETGATE_KV, page.keys, (k, data) => ({
@@ -506,7 +517,12 @@ async function deleteOrigin(slug, env) {
 			await Promise.all(batch.map(k => env.WICKETGATE_KV.delete(k)));
 		}
 		keysDeleted += pageKeysToDelete.length;
+		pagesScanned++;
 		cursor = page.list_complete ? undefined : page.cursor;
+		if (cursor && pagesScanned >= DELETE_MAX_PAGES) {
+			truncated = true;
+			break;
+		}
 	} while (cursor);
 
 	// Delete the origin entry itself last (after all associated keys are removed).
@@ -514,6 +530,16 @@ async function deleteOrigin(slug, env) {
 	// the origin still exists and the delete can be retried cleanly. Deleting the
 	// origin first would create orphaned keys that could silently resurrect if a new
 	// origin were created with the same slug.
+	// If the scan was truncated (namespace too large), skip deleting the origin so
+	// the caller can safely retry — the next call will resume from the beginning,
+	// deleting more keys until they are exhausted and the origin can be removed.
+	if (truncated) {
+		return adminJsonResponse(202, {
+			message: 'Partial delete: namespace too large for a single request. Retry to continue.',
+			keysDeleted,
+		});
+	}
+
 	await env.WICKETGATE_KV.delete(`origin:${slug}`);
 
 	return adminJsonResponse(200, {
@@ -593,6 +619,10 @@ async function discoverTunnels(env) {
 					`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
 					{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: tunnelAbort.signal }
 				);
+			} catch (fetchErr) {
+				if (fetchErr?.name === 'AbortError')
+					return secureJsonError(502, 'Tunnel API timed out. Try again later.');
+				throw fetchErr;
 			} finally {
 				clearTimeout(tunnelTimer);
 			}
