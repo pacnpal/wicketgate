@@ -521,15 +521,23 @@ async function deleteOrigin(slug, request, env) {
 	let pagesScanned = 0;
 	let truncated = false;
 	let page;
+	// Track whether the current kv.list() call is using a user-supplied cursor.
+	// Only the first iteration may use a user-provided resumeCursor; subsequent
+	// iterations use internally-generated cursors from previous pages.
+	let isUserSuppliedCursor = cursor !== undefined;
 	do {
 		try {
 			page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: LIST_MAX_ENTRIES });
 		} catch (err) {
-			// kv.list() throws on an invalid or expired cursor (e.g., a tampered resumeCursor
-			// from the request body). Return a 400 so the caller gets a clean JSON error
-			// rather than an unhandled exception that would surface as a platform-level crash.
-			return secureJsonError(400, 'Invalid resumeCursor.');
+			// Return 400 only when the failure is attributable to a user-supplied resumeCursor
+			// (invalid or expired token from the request body). For all other cases — no cursor,
+			// or an internally-generated cursor from a previous page — return 500 so the caller
+			// distinguishes a transient KV error from a bad input.
+			if (isUserSuppliedCursor)
+				return secureJsonError(400, 'Invalid resumeCursor.');
+			return secureJsonError(500, 'KV list failed.');
 		}
+		isUserSuppliedCursor = false; // Subsequent iterations use internally-generated cursors
 		try {
 			const keyData = await batchKvFetch(env.WICKETGATE_KV, page.keys, (k, data) => ({
 				name: k.name,
