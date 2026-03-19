@@ -224,13 +224,7 @@ async function handleProxy(request, url, env) {
 	const proxyTimer = setTimeout(() => proxyAbort.abort(), PROXY_TIMEOUT_MS);
 
 	try {
-		let response;
-		try {
-			response = await fetch(originRequest, { signal: proxyAbort.signal });
-		} catch (err) {
-			clearTimeout(proxyTimer);
-			throw err;
-		}
+		const response = await fetch(originRequest, { signal: proxyAbort.signal });
 		const responseHeaders = new Headers(response.headers);
 
 		// Strip sensitive origin response headers
@@ -260,7 +254,6 @@ async function handleProxy(request, url, env) {
 				} else {
 					// External Location: strip for 2xx, block 3xx to prevent unresolvable redirect
 					if (response.status >= 300 && response.status < 400) {
-						clearTimeout(proxyTimer);
 						return secureJsonError(502, 'Service unavailable.');
 					}
 					responseHeaders.delete('location');
@@ -268,7 +261,6 @@ async function handleProxy(request, url, env) {
 			} catch {
 				// Malformed Location: strip for 2xx, block 3xx
 				if (response.status >= 300 && response.status < 400) {
-					clearTimeout(proxyTimer);
 					return secureJsonError(502, 'Service unavailable.');
 				}
 				responseHeaders.delete('location');
@@ -288,10 +280,6 @@ async function handleProxy(request, url, env) {
 		// Keys can be revoked at any time; prevent caching to avoid stale access
 		responseHeaders.set('Cache-Control', 'no-store');
 
-		// Clear the abort timer now that all synchronous header processing is done.
-		// The timer intentionally stays live through header processing above;
-		// body streaming is handled by the platform and does not block the Worker.
-		clearTimeout(proxyTimer);
 		return new Response(response.body, {
 			status: response.status,
 			statusText: response.statusText,
@@ -299,6 +287,10 @@ async function handleProxy(request, url, env) {
 		});
 	} catch (err) {
 		return secureJsonError(502, 'Service unavailable.');
+	} finally {
+		// Always clear the abort timer regardless of outcome — covers the success path,
+		// fetch errors, header-processing exceptions, and early redirect returns.
+		clearTimeout(proxyTimer);
 	}
 }
 
