@@ -520,9 +520,6 @@ async function deleteOrigin(slug, request, env) {
 	let keysDeleted = 0;
 	let pagesScanned = 0;
 	let truncated = false;
-	let keysDeleted = 0;
-	let pagesScanned = 0;
-	let truncated = false;
 	let page;
 	do {
 		try {
@@ -533,18 +530,24 @@ async function deleteOrigin(slug, request, env) {
 			// rather than an unhandled exception that would surface as a platform-level crash.
 			return secureJsonError(400, 'Invalid resumeCursor.');
 		}
-		const keyData = await batchKvFetch(env.WICKETGATE_KV, page.keys, (k, data) => ({
-			name: k.name,
-			origin: data?.origin,
-		}));
-		const pageKeysToDelete = keyData
-			.filter(key => key.origin === slug)
-			.map(key => key.name);
-		for (let i = 0; i < pageKeysToDelete.length; i += LIST_BATCH_SIZE) {
-			const batch = pageKeysToDelete.slice(i, i + LIST_BATCH_SIZE);
-			await Promise.all(batch.map(k => env.WICKETGATE_KV.delete(k)));
+		try {
+			const keyData = await batchKvFetch(env.WICKETGATE_KV, page.keys, (k, data) => ({
+				name: k.name,
+				origin: data?.origin,
+			}));
+			const pageKeysToDelete = keyData
+				.filter(key => key.origin === slug)
+				.map(key => key.name);
+			for (let i = 0; i < pageKeysToDelete.length; i += LIST_BATCH_SIZE) {
+				const batch = pageKeysToDelete.slice(i, i + LIST_BATCH_SIZE);
+				await Promise.all(batch.map(k => env.WICKETGATE_KV.delete(k)));
+			}
+			keysDeleted += pageKeysToDelete.length;
+		} catch (err) {
+			// batchKvFetch or kv.delete() threw a transient error. Return 500 so the caller
+			// gets a JSON error rather than a platform-level crash.
+			return secureJsonError(500, 'KV operation failed.');
 		}
-		keysDeleted += pageKeysToDelete.length;
 		pagesScanned++;
 		cursor = page.list_complete ? undefined : page.cursor;
 		if (!page.list_complete && pagesScanned >= DELETE_MAX_PAGES) {
