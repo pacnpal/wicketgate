@@ -499,12 +499,11 @@ async function deleteOrigin(slug, request, env) {
 	let cursor;
 	const contentType = request.headers.get('content-type') || '';
 	if (contentType === 'application/json' || contentType.startsWith('application/json;')) {
-		try {
-			const body = await request.json();
-			// Validate: cursor must be a non-empty string (opaque KV pagination token)
-			if (typeof body?.resumeCursor === 'string' && body.resumeCursor.length > 0)
-				cursor = body.resumeCursor;
-		} catch { /* no body or invalid JSON — start from beginning */ }
+		const body = await safeLimitedJson(request, MAX_REQUEST_BODY);
+		// Validate: cursor must be a non-empty string (opaque KV pagination token)
+		if (typeof body?.resumeCursor === 'string' && body.resumeCursor.length > 0)
+			cursor = body.resumeCursor;
+		// safeLimitedJson returns null for oversized/malformed input; null body leaves cursor as undefined
 	}
 
 	// Scan every page of keys and delete matching ones immediately, page-by-page.
@@ -690,7 +689,6 @@ async function discoverTunnels(env) {
 					try {
 						const cfgAbort = new AbortController();
 						const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
-						let cfgData;
 						try {
 							const cfgRes = await fetch(
 								`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
@@ -702,23 +700,23 @@ async function discoverTunnels(env) {
 							}
 							// Parse the body inside the try block so the abort signal covers body delivery,
 							// not just time-to-first-byte.
-							cfgData = await cfgRes.json();
+							const cfgData = await cfgRes.json();
+							if (cfgData.success && cfgData.result?.config?.ingress) {
+								for (const rule of cfgData.result.config.ingress) {
+									if (rule.hostname) {
+										hostnames.push({
+											hostname: rule.hostname,
+											tunnelName: tunnel.name,
+											// Intentionally omit rule.service — it exposes internal network topology
+											suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
+										});
+									}
+								}
+							} else if (!cfgData.success) {
+								warnings.push(`Tunnel "${tunnel.name}" returned an API error.`);
+							}
 						} finally {
 							clearTimeout(cfgTimer);
-						}
-						if (cfgData.success && cfgData.result?.config?.ingress) {
-							for (const rule of cfgData.result.config.ingress) {
-								if (rule.hostname) {
-									hostnames.push({
-										hostname: rule.hostname,
-										tunnelName: tunnel.name,
-										// Intentionally omit rule.service — it exposes internal network topology
-										suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
-									});
-								}
-							}
-						} else if (!cfgData.success) {
-							warnings.push(`Tunnel "${tunnel.name}" returned an API error.`);
 						}
 					} catch (err) {
 						let msg;
