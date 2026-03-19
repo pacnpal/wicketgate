@@ -227,8 +227,9 @@ async function handleProxy(request, url, env) {
 		let response;
 		try {
 			response = await fetch(originRequest, { signal: proxyAbort.signal });
-		} finally {
+		} catch (err) {
 			clearTimeout(proxyTimer);
+			throw err;
 		}
 		const responseHeaders = new Headers(response.headers);
 
@@ -259,6 +260,7 @@ async function handleProxy(request, url, env) {
 				} else {
 					// External Location: strip for 2xx, block 3xx to prevent unresolvable redirect
 					if (response.status >= 300 && response.status < 400) {
+						clearTimeout(proxyTimer);
 						return secureJsonError(502, 'Service unavailable.');
 					}
 					responseHeaders.delete('location');
@@ -266,6 +268,7 @@ async function handleProxy(request, url, env) {
 			} catch {
 				// Malformed Location: strip for 2xx, block 3xx
 				if (response.status >= 300 && response.status < 400) {
+					clearTimeout(proxyTimer);
 					return secureJsonError(502, 'Service unavailable.');
 				}
 				responseHeaders.delete('location');
@@ -285,6 +288,10 @@ async function handleProxy(request, url, env) {
 		// Keys can be revoked at any time; prevent caching to avoid stale access
 		responseHeaders.set('Cache-Control', 'no-store');
 
+		// Clear the abort timer now that all synchronous header processing is done.
+		// The timer intentionally stays live through header processing above;
+		// body streaming is handled by the platform and does not block the Worker.
+		clearTimeout(proxyTimer);
 		return new Response(response.body, {
 			status: response.status,
 			statusText: response.statusText,
@@ -498,7 +505,8 @@ async function deleteOrigin(slug, request, env) {
 	// This ensures forward progress when the namespace is very large.
 	let cursor;
 	const contentType = request.headers.get('content-type') || '';
-	if (contentType === 'application/json' || contentType.startsWith('application/json;')) {
+	const contentTypeLc = contentType.toLowerCase();
+	if (contentTypeLc === 'application/json' || contentTypeLc.startsWith('application/json;')) {
 		const body = await safeLimitedJson(request, MAX_REQUEST_BODY);
 		// Validate: cursor must be a non-empty string (opaque KV pagination token)
 		if (typeof body?.resumeCursor === 'string' && body.resumeCursor.length > 0)
