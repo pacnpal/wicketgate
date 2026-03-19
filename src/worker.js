@@ -486,10 +486,11 @@ async function deleteOrigin(slug, env) {
 	if (!(await env.WICKETGATE_KV.get(`origin:${slug}`)))
 		return secureJsonError(404, 'Not found.');
 
-	// Scan every page of keys and delete those referencing this origin.
-	// Use kv.list() directly (without the LIST_MAX_ENTRIES cap) so no associated
-	// key is silently left behind in large namespaces.
-	const keysToDelete = [];
+	// Scan every page of keys and delete matching ones immediately, page-by-page.
+	// This avoids accumulating an unbounded list of key names in memory for large
+	// namespaces. Per-page deletes are issued in bounded batches (LIST_BATCH_SIZE)
+	// to keep concurrent KV operations predictable.
+	let keysDeleted = 0;
 	let cursor = undefined;
 	do {
 		const page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: LIST_MAX_ENTRIES });
@@ -497,25 +498,27 @@ async function deleteOrigin(slug, env) {
 			name: k.name,
 			origin: data?.origin,
 		}));
-		for (const key of keyData) {
-			if (key.origin === slug) {
-				keysToDelete.push(key.name);
-			}
+		const pageKeysToDelete = keyData
+			.filter(key => key.origin === slug)
+			.map(key => key.name);
+		for (let i = 0; i < pageKeysToDelete.length; i += LIST_BATCH_SIZE) {
+			const batch = pageKeysToDelete.slice(i, i + LIST_BATCH_SIZE);
+			await Promise.all(batch.map(k => env.WICKETGATE_KV.delete(k)));
 		}
-		cursor = page.list_complete ? undefined : (page.cursor || undefined);
+		keysDeleted += pageKeysToDelete.length;
+		cursor = page.list_complete ? undefined : page.cursor;
 	} while (cursor);
 
-	// Delete origin and associated keys
+	// Delete the origin entry itself last (after all associated keys are removed).
+	// This ordering is intentional: if the operation is interrupted before this line,
+	// the origin still exists and the delete can be retried cleanly. Deleting the
+	// origin first would create orphaned keys that could silently resurrect if a new
+	// origin were created with the same slug.
 	await env.WICKETGATE_KV.delete(`origin:${slug}`);
-	// Delete associated keys in bounded batches to avoid excessive concurrency
-	for (let i = 0; i < keysToDelete.length; i += LIST_BATCH_SIZE) {
-		const batch = keysToDelete.slice(i, i + LIST_BATCH_SIZE);
-		await Promise.all(batch.map(k => env.WICKETGATE_KV.delete(k)));
-	}
 
 	return adminJsonResponse(200, {
 		message: 'Deleted.',
-		keysDeleted: keysToDelete.length,
+		keysDeleted,
 	});
 }
 
