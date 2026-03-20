@@ -182,13 +182,19 @@ binding = "WICKETGATE_KV"
 id = "abc123def456..."
 ```
 
-Open `wrangler.toml` and uncomment/update the KV section:
+open `wrangler.jsonc` and uncomment/update the KV section:
 
-```toml
-[[kv_namespaces]]
-binding = "WICKETGATE_KV"
-id = "abc123def456..."    # ← paste your actual ID
+```jsonc
+	"kv_namespaces": [
+	  {
+	    "binding": "WICKETGATE_KV",
+	    "id": "abc123def456..."    // ← paste your actual ID here
+	  }
+	],
 ```
+
+> [!TIP]
+> If `wrangler login` or the creation command gets stuck in your terminal, you can easily create the namespace directly from the Cloudflare Dashboard! In the left sidebar, go to **Workers & Pages** → **KV**, click **Create a namespace**, name it `WICKETGATE_KV`, and grab the ID from there to paste into your config.
 
 #### Step 4: Set secrets
 
@@ -197,9 +203,9 @@ id = "abc123def456..."    # ← paste your actual ID
 npx wrangler secret put ADMIN_SECRET
 # Paste a strong random string, e.g.: openssl rand -base64 32
 
-# Optional — for auto-discovering tunnel hostnames:
-npx wrangler secret put CF_API_TOKEN
-npx wrangler secret put CF_ACCOUNT_ID
+# Optional — for auto-discovering tunnel hostnames during deployment:
+export CF_API_TOKEN="your-api-token"
+export CF_ACCOUNT_ID="your-account-id"
 ```
 
 **Generating an ADMIN_SECRET:**
@@ -212,7 +218,7 @@ openssl rand -base64 32
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-**CF_API_TOKEN** is optional but required if you want to use the auto-discovery feature. To create one:
+**CF_API_TOKEN** is optional but required in your local terminal if you want to use the auto-discovery feature. This token is *compiled directly into the worker code* during deployment, allowing the dashboard to fetch tunnels dynamically at any time without exposing the token in your environment variables. To create one:
 1. Go to [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens)
 2. Click **Create Token** -> **Create Custom Token**
 3. Under **Permissions**, select: `Account` | `Cloudflare Tunnel` | `Read`
@@ -224,7 +230,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 #### Step 5: Deploy
 
 ```bash
-npx wrangler deploy
+npm run deploy
 ```
 
 Your Worker is now live at `wicketgate.YOUR_SUBDOMAIN.workers.dev`.
@@ -251,7 +257,7 @@ pattern = "wicketgate.yourdomain.com/*"
 zone_name = "yourdomain.com"
 ```
 
-3. Redeploy: `npx wrangler deploy`
+3. Redeploy: `npm run deploy`
 
 ---
 
@@ -278,12 +284,14 @@ Download both `src/worker.js` and `src/dashboard.html` from the [Wicketgate repo
 
 Your Worker is now live at `wicketgate.YOUR_SUBDOMAIN.workers.dev`.
 
+> [!WARNING]  
+> Because Wicketgate discovers tunnels securely at build-time to avoid exposing API credentials, the **Tunnel Discovery** feature is not available if you deploy via the cloud dashboard. You must deploy via the Wrangler CLI (Option A) to populate the Discover tab.
+
 #### Step 3: Create a KV namespace
 
-1. In the left sidebar go to **Workers & Pages** → **KV**
+1. In the left sidebar of the Cloudflare dashboard, go to **Workers & Pages** → **KV**
 2. Click **Create a namespace**
 3. Enter `WICKETGATE_KV` as the name and click **Add**
-4. Note the namespace ID shown in the list — you'll need it in the next step
 
 #### Step 4: Bind the KV namespace to your Worker
 
@@ -291,7 +299,7 @@ Your Worker is now live at `wicketgate.YOUR_SUBDOMAIN.workers.dev`.
 2. Scroll to **Bindings** and click **Add**
 3. Choose **KV namespace**
 4. Set **Variable name** to `WICKETGATE_KV`
-5. Select the `WICKETGATE_KV` namespace you just created
+5. Select the `WICKETGATE_KV` namespace you just created from the dropdown
 6. Click **Deploy** to apply the binding
 
 #### Step 5: Set secrets
@@ -304,8 +312,6 @@ Your Worker is now live at `wicketgate.YOUR_SUBDOMAIN.workers.dev`.
 | Variable name | Value | Required? |
 |---------------|-------|-----------|
 | `ADMIN_SECRET` | A strong random string (see below) | Yes* |
-| `CF_API_TOKEN` | Cloudflare API token with `Account > Cloudflare Tunnel > Read` | No |
-| `CF_ACCOUNT_ID` | Your Cloudflare account ID (dashboard home, right sidebar) | No |
 
 5. Click **Deploy** after adding all secrets
 
@@ -385,8 +391,6 @@ You need one service token per Access application. If multiple hostnames share a
 |----------|----------|-------------|
 | `ADMIN_SECRET` | Yes* | Password for the admin dashboard and API. Required unless `ALLOW_UNAUTH_ADMIN=true` is set. |
 | `ALLOW_UNAUTH_ADMIN` | No | Set to `"true"` to bypass built-in admin auth. **Only use when `/admin*` is protected by an external gate** (e.g., Cloudflare Access). |
-| `CF_API_TOKEN` | No | Cloudflare API token for tunnel discovery. Needs `Account > Cloudflare Tunnel > Read`. |
-| `CF_ACCOUNT_ID` | No | Your Cloudflare account ID. Required alongside `CF_API_TOKEN`. |
 
 \* Required unless `ALLOW_UNAUTH_ADMIN=true` is explicitly set (external-gate mode only).
 
@@ -436,7 +440,7 @@ Configure services wicketgate can proxy to:
 
 ### Discover tab
 
-If you've set `CF_API_TOKEN` and `CF_ACCOUNT_ID`, this tab pulls all hostnames from your Cloudflare Tunnels. For each hostname:
+If you deployed Wicketgate via the Wrangler CLI with `CF_API_TOKEN` and `CF_ACCOUNT_ID` exported in your environment, they were compiled into your worker. This tab dynamically queries your Cloudflare Tunnels right now and lists every hostname it finds. For each hostname:
 
 - If it's already configured as an origin, it shows a "configured" badge
 - If not, click **Add as origin** to prefill the origin form — you just need to add the service token credentials

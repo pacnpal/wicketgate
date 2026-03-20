@@ -15,8 +15,12 @@
  */
 {
 	"name": "wicketgate",
-	"main": "src/worker.js",
+	"main": "dist/worker.js",
 	"compatibility_date": "2024-12-01",
+	
+	"build": {
+		"command": "node scripts/build.js"
+	},
 	
 	"observability": {
 		"enabled": false,
@@ -39,11 +43,11 @@
 			"type": "Text",
 			"globs": ["**/*.html"]
 		}
-	]
+	],
 
-	// "vars": {
-	//   "ALLOW_UNAUTH_ADMIN": "true"   // uncomment only when /admin* is externally gated (e.g. Cloudflare Access)
-	// },
+	"vars": {
+	  "ALLOW_UNAUTH_ADMIN": "true"   // uncomment only when /admin* is externally gated (e.g. Cloudflare Access)
+	},
 	//
 	// "kv_namespaces": [
 	//   {

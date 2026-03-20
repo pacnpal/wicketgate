@@ -13,11 +13,13 @@
  * Secrets:
  *   ADMIN_SECRET        - Required for admin dashboard / API unless ALLOW_UNAUTH_ADMIN is set
  *   ALLOW_UNAUTH_ADMIN  - Set to "true" to skip built-in auth (only when /admin/* is externally gated)
- *   CF_API_TOKEN        - Cloudflare API token (optional, for tunnel discovery)
- *   CF_ACCOUNT_ID       - Cloudflare account ID (optional, for tunnel discovery)
+ *   CF_API_TOKEN        - (Injected at build time via deploy script)
+ *   CF_ACCOUNT_ID       - (Injected at build time via deploy script)
  */
-
 import DASHBOARD_HTML from './dashboard.html';
+
+const CF_API_TOKEN = "__INJECT_CF_API_TOKEN__";
+const CF_ACCOUNT_ID = "__INJECT_CF_ACCOUNT_ID__";
 
 // ── Security constants ──
 const MAX_SLUG_LENGTH = 48;
@@ -351,7 +353,7 @@ async function handleAdmin(request, url, env) {
 
 	// ── Discover ──
 	if ((p === '/admin/discover' || p === '/admin/discover/') && request.method === 'GET')
-		return discoverTunnels(env);
+		return discoverTunnels(request, env);
 
 	return secureJsonError(404, 'Not found.');
 }
@@ -719,9 +721,9 @@ async function deleteKey(key, env) {
 
 // ─── Tunnel discovery ───────────────────────────────────────────────
 
-async function discoverTunnels(env) {
-	if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID)
-		return secureJsonError(400, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID to be configured.');
+async function discoverTunnels(request, env) {
+	if (!CF_API_TOKEN || !CF_ACCOUNT_ID || CF_API_TOKEN === '__INJECT_CF_API_TOKEN__')
+		return secureJsonError(400, 'Discovery requires Cloudflare API Token and Account ID. Re-run deployment with CF_API_TOKEN and CF_ACCOUNT_ID environment variables exported to enable this feature.');
 
 	try {
 		// Fetch all pages of tunnels. A single AbortController is shared across all
@@ -739,12 +741,14 @@ async function discoverTunnels(env) {
 				let tunnelsData;
 				try {
 					const tunnelsRes = await fetch(
-						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
-						{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: tunnelAbort.signal }
+						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
+						{ headers: { 'Authorization': `Bearer ${CF_API_TOKEN}` }, signal: tunnelAbort.signal }
 					);
 					if (!tunnelsRes.ok) {
 						if (tunnelsRes.status === 429)
 							return secureJsonError(502, 'Tunnel API rate limit reached. Try again later.');
+						if (tunnelsRes.status === 403 || tunnelsRes.status === 401)
+							return secureJsonError(403, 'Invalid Cloudflare API Token or Account ID.');
 						return secureJsonError(502, `Tunnel API error (HTTP ${tunnelsRes.status}).`);
 					}
 					// Parse the body inside the try block so the abort signal covers body delivery,
@@ -811,9 +815,9 @@ async function discoverTunnels(env) {
 							const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
 							try {
 								const cfgRes = await fetch(
-									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
+									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
 									{
-										headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` },
+										headers: { 'Authorization': `Bearer ${CF_API_TOKEN}` },
 										// Combine per-tunnel and phase signals so the phase deadline can abort
 										// fetches that are still in-flight when cfgPhaseTimer fires, not just
 										// prevent new batches from starting.
