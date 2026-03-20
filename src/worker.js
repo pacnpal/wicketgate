@@ -76,7 +76,7 @@ export default {
 		if (request.method === 'OPTIONS') {
 			// Only allow CORS on proxy paths, not admin
 			if (url.pathname.startsWith('/s/')) {
-				return new Response(null, { headers: { ...proxyCorsHeaders(), ...SECURITY_HEADERS } });
+				return new Response(null, { status: 204, headers: { ...proxyCorsHeaders(), ...SECURITY_HEADERS } });
 			}
 			// Admin CORS: same-origin only (dashboard is served from same origin)
 			return new Response(null, {
@@ -331,7 +331,8 @@ async function handleAdmin(request, url, env) {
 		if (slug.length > MAX_SLUG_LENGTH || !SLUG_RE.test(slug))
 			return secureJsonError(404, 'Not found.');
 		if (request.method === 'DELETE') return deleteOrigin(slug, request, env);
-		if (request.method === 'PUT') return updateOrigin(slug, request, env);
+		if (request.method === 'PUT') return replaceOrigin(slug, request, env);
+		if (request.method === 'PATCH') return updateOrigin(slug, request, env);
 	}
 
 	// ── Keys ──
@@ -480,14 +481,63 @@ async function updateOrigin(slug, request, env) {
 			return secureJsonError(400, 'Invalid service token secret.');
 		updated.serviceTokenSecret = body.serviceTokenSecret;
 	}
-	if (body.label) {
+	if (body.label !== undefined) {
 		if (typeof body.label !== 'string' || body.label.length > MAX_LABEL_LENGTH)
 			return secureJsonError(400, 'Invalid label.');
 		updated.label = body.label;
 	}
 
-	await env.WICKETGATE_KV.put(`origin:${slug}`, JSON.stringify(updated));
+	try {
+		await env.WICKETGATE_KV.put(`origin:${slug}`, JSON.stringify(updated));
+	} catch (e) {
+		return secureJsonError(500, 'Service unavailable.');
+	}
 	return adminJsonResponse(200, { slug, message: 'Updated.' });
+}
+
+async function replaceOrigin(slug, request, env) {
+	const existing = await kvGetJson(env.WICKETGATE_KV, `origin:${slug}`);
+	if (!existing) return secureJsonError(404, 'Not found.');
+
+	const body = await safeLimitedJson(request, MAX_REQUEST_BODY);
+	if (!body) return secureJsonError(400, 'Invalid or oversized request body.');
+
+	const { hostname, serviceTokenId, serviceTokenSecret, label } = body;
+	if (!hostname || !serviceTokenId || !serviceTokenSecret)
+		return secureJsonError(400, 'Required: hostname, serviceTokenId, serviceTokenSecret.');
+
+	// Validate hostname
+	const hostnameError = validateHostname(hostname);
+	if (hostnameError) return secureJsonError(400, hostnameError);
+	const normalizedHostname = hostname.toLowerCase();
+
+	// Validate service tokens
+	if (typeof serviceTokenId !== 'string' || serviceTokenId.length > 200)
+		return secureJsonError(400, 'Invalid service token ID.');
+	if (typeof serviceTokenSecret !== 'string' || serviceTokenSecret.length > 200)
+		return secureJsonError(400, 'Invalid service token secret.');
+
+	// Validate label
+	if (label !== undefined) {
+		if (typeof label !== 'string' || label.length > MAX_LABEL_LENGTH)
+			return secureJsonError(400, 'Invalid label.');
+	}
+
+	const normalizedLabel = (label !== undefined && label !== null) ? label : slug;
+	const replaced = {
+		hostname: normalizedHostname,
+		serviceTokenId,
+		serviceTokenSecret,
+		label: normalizedLabel,
+		created: existing.created, // Preserve creation timestamp
+	};
+
+	try {
+		await env.WICKETGATE_KV.put(`origin:${slug}`, JSON.stringify(replaced));
+	} catch (e) {
+		return secureJsonError(500, 'Service unavailable.');
+	}
+	return adminJsonResponse(200, { slug, hostname: normalizedHostname, label: normalizedLabel, message: 'Replaced.' });
 }
 
 async function deleteOrigin(slug, request, env) {
@@ -638,9 +688,13 @@ async function createKey(request, env) {
 		return secureJsonError(400, 'Origin does not exist.');
 
 	const key = generateKey();
-	await env.WICKETGATE_KV.put(`key:${key}`, JSON.stringify({
-		name, origin, created: new Date().toISOString(),
-	}));
+	try {
+		await env.WICKETGATE_KV.put(`key:${key}`, JSON.stringify({
+			name, origin, created: new Date().toISOString(),
+		}));
+	} catch (e) {
+		return secureJsonError(500, 'Service unavailable.');
+	}
 
 	return adminJsonResponse(201, { key, name, origin });
 }
@@ -648,7 +702,11 @@ async function createKey(request, env) {
 async function deleteKey(key, env) {
 	if (!(await env.WICKETGATE_KV.get(`key:${key}`)))
 		return secureJsonError(404, 'Not found.');
-	await env.WICKETGATE_KV.delete(`key:${key}`);
+	try {
+		await env.WICKETGATE_KV.delete(`key:${key}`);
+	} catch (e) {
+		return secureJsonError(500, 'Service unavailable.');
+	}
 	return adminJsonResponse(200, { message: 'Revoked.' });
 }
 
