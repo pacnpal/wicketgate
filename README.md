@@ -212,7 +212,12 @@ openssl rand -base64 32
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-**CF_API_TOKEN** needs the permission `Account > Cloudflare Tunnel > Read`. Create one at https://dash.cloudflare.com/profile/api-tokens. This is optional — you can add origins manually without it.
+**CF_API_TOKEN** is optional but required if you want to use the auto-discovery feature. To create one:
+1. Go to [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens)
+2. Click **Create Token** -> **Create Custom Token**
+3. Under **Permissions**, select: `Account` | `Cloudflare Tunnel` | `Read`
+4. Under **Account Resources**, select: `Include` | `Your Account Name`
+5. Click **Continue to summary** and **Create Token**
 
 **CF_ACCOUNT_ID** is on your Cloudflare dashboard home page, right sidebar.
 

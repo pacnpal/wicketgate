@@ -91,6 +91,11 @@ export default {
 			});
 		}
 
+		// ── Root redirect ──
+		if (url.pathname === '/') {
+			return Response.redirect(new URL('/admin', url).toString(), 302);
+		}
+
 		// ── Admin dashboard ──
 		if (url.pathname === '/admin' || url.pathname === '/admin/') {
 			// Generate a per-request CSP nonce to replace unsafe-inline
@@ -145,7 +150,7 @@ export default {
 
 async function handleProxy(request, url, env) {
 	if (!env.WICKETGATE_KV) {
-		return secureJsonError(500, 'Service unavailable.');
+		return secureJsonError(500, 'WICKETGATE_KV namespace is not bound. Please configure it.');
 	}
 
 	// Parse: /s/{key}/rest/of/path
@@ -302,7 +307,7 @@ async function handleProxy(request, url, env) {
 // ═══════════════════════════════════════════════════════════════════
 
 async function handleAdmin(request, url, env) {
-	if (!env.WICKETGATE_KV) return secureJsonError(500, 'Service unavailable.');
+	if (!env.WICKETGATE_KV) return secureJsonError(500, 'WICKETGATE_KV namespace is not bound. Please configure it.');
 
 	// ── Auth ──
 	// Auth is required unless ALLOW_UNAUTH_ADMIN is explicitly set to "true".
@@ -716,7 +721,7 @@ async function deleteKey(key, env) {
 
 async function discoverTunnels(env) {
 	if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID)
-		return secureJsonError(500, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID.');
+		return secureJsonError(400, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID to be configured.');
 
 	try {
 		// Fetch all pages of tunnels. A single AbortController is shared across all
