@@ -28,7 +28,12 @@ const MAX_REQUEST_BODY = 8192; // 8KB for admin API bodies
 const KEY_BYTES = 32; // 256-bit entropy
 const LIST_MAX_ENTRIES = 500; // Max entries returned per list call (origins or keys)
 const LIST_BATCH_SIZE = 50;   // KV reads are issued in sequential batches to stay within Worker limits
+const DELETE_MAX_PAGES = 20;  // Max KV pages scanned per deleteOrigin call (20 × 500 = 10,000 keys).
+                               // Keeps free-tier workers well inside the 30 s wall-clock limit.
+                               // Large namespaces are handled via resumeCursor retries.
 const TUNNEL_FETCH_CONCURRENCY = 5; // Max parallel Cloudflare API requests during tunnel discovery
+const PROXY_TIMEOUT_MS = 25_000;   // Abort upstream proxy fetch after 25 s (Worker CPU limit is 30 s)
+const DISCOVER_TIMEOUT_MS = 10_000; // Per-request timeout for Cloudflare API calls during discovery
 
 // Hostnames must be valid DNS: alphanumeric, hyphens, dots, no leading/trailing dots
 const HOSTNAME_RE = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i;
@@ -43,6 +48,17 @@ const SECURITY_HEADERS = {
 	'Referrer-Policy': 'no-referrer',
 	'X-Robots-Tag': 'noindex, nofollow',
 	'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+};
+
+// Subset of SECURITY_HEADERS safe to apply to proxied responses.
+// X-Frame-Options: DENY and Permissions-Policy are intentionally excluded: they
+// can break browser-based services (e.g. media server UIs that embed iframes or
+// need camera/microphone access) when applied to proxied content that the origin
+// did not intend to restrict.
+const PROXY_SECURITY_HEADERS = {
+	'X-Content-Type-Options': 'nosniff',
+	'Referrer-Policy': 'no-referrer',
+	'X-Robots-Tag': 'noindex, nofollow',
 };
 
 
@@ -83,9 +99,9 @@ export default {
 			const nonce = btoa(String.fromCharCode(...nonceBytes));
 
 			// Inject nonce into inline <style> and <script> tags
-		const html = DASHBOARD_HTML
-			.replace(/(<style)(?=[>\s])/i, `<style nonce="${nonce}"`)
-			.replace(/(<script)(?=[>\s])/i, `<script nonce="${nonce}"`);
+			const html = DASHBOARD_HTML
+				.replace(/(<style)(?=[>\s])/gi, `<style nonce="${nonce}"`)
+				.replace(/(<script)(?=[>\s])/gi, `<script nonce="${nonce}"`);
 
 			return new Response(html, {
 				headers: {
@@ -202,8 +218,13 @@ async function handleProxy(request, url, env) {
 		redirect: 'manual',
 	});
 
+	// Abort the upstream fetch if it takes longer than PROXY_TIMEOUT_MS to prevent
+	// the Worker from hanging until the 30-second CPU limit is reached.
+	const proxyAbort = new AbortController();
+	const proxyTimer = setTimeout(() => proxyAbort.abort(), PROXY_TIMEOUT_MS);
+
 	try {
-		const response = await fetch(originRequest);
+		const response = await fetch(originRequest, { signal: proxyAbort.signal });
 		const responseHeaders = new Headers(response.headers);
 
 		// Strip sensitive origin response headers
@@ -246,9 +267,16 @@ async function handleProxy(request, url, env) {
 			}
 		}
 
-		// Add proxy CORS and security headers
+		// Add proxy CORS and security headers.
+		// Use PROXY_SECURITY_HEADERS (not the full SECURITY_HEADERS) to avoid
+		// stamping X-Frame-Options: DENY / Permissions-Policy onto proxied responses
+		// that may belong to browser-based services (media UIs, dashboards, etc.).
+		// These headers intentionally enforce the proxy's security policy regardless
+		// of what the origin sent — Referrer-Policy and X-Robots-Tag are always
+		// set to the proxy's values to prevent referrer leakage and indexing of
+		// proxy URLs, even if the origin intended different values.
 		Object.entries(proxyCorsHeaders()).forEach(([k, v]) => responseHeaders.set(k, v));
-		Object.entries(SECURITY_HEADERS).forEach(([k, v]) => responseHeaders.set(k, v));
+		Object.entries(PROXY_SECURITY_HEADERS).forEach(([k, v]) => responseHeaders.set(k, v));
 		// Keys can be revoked at any time; prevent caching to avoid stale access
 		responseHeaders.set('Cache-Control', 'no-store');
 
@@ -258,7 +286,13 @@ async function handleProxy(request, url, env) {
 			headers: responseHeaders,
 		});
 	} catch (err) {
+		if (err?.name === 'AbortError')
+			return secureJsonError(504, 'Gateway timeout.');
 		return secureJsonError(502, 'Service unavailable.');
+	} finally {
+		// Always clear the abort timer regardless of outcome — covers the success path,
+		// fetch errors, header-processing exceptions, and early redirect returns.
+		clearTimeout(proxyTimer);
 	}
 }
 
@@ -296,7 +330,7 @@ async function handleAdmin(request, url, env) {
 		const slug = oMatch[1];
 		if (slug.length > MAX_SLUG_LENGTH || !SLUG_RE.test(slug))
 			return secureJsonError(404, 'Not found.');
-		if (request.method === 'DELETE') return deleteOrigin(slug, env);
+		if (request.method === 'DELETE') return deleteOrigin(slug, request, env);
 		if (request.method === 'PUT') return updateOrigin(slug, request, env);
 	}
 
@@ -456,33 +490,116 @@ async function updateOrigin(slug, request, env) {
 	return adminJsonResponse(200, { slug, message: 'Updated.' });
 }
 
-async function deleteOrigin(slug, env) {
+async function deleteOrigin(slug, request, env) {
 	if (!(await env.WICKETGATE_KV.get(`origin:${slug}`)))
 		return secureJsonError(404, 'Not found.');
-	
-	// Find and delete all keys that reference this origin
-	const { kvKeys } = await listKvPrefix(env.WICKETGATE_KV, 'key:');
-	const keysToDelete = [];
-	
-	// Fetch key data in batches to check which ones reference this origin
-	const keyData = await batchKvFetch(env.WICKETGATE_KV, kvKeys, (k, data) => ({
-		name: k.name,
-		origin: data?.origin,
-	}));
-	
-	for (const key of keyData) {
-		if (key.origin === slug) {
-			keysToDelete.push(key.name);
-		}
+
+	// Accept an optional resumeCursor from the request body so the caller can
+	// resume a previously truncated scan rather than always restarting from page 1.
+	// This ensures forward progress when the namespace is very large.
+	let cursor;
+	const contentType = request.headers.get('content-type') || '';
+	const contentTypeLc = contentType.toLowerCase();
+	if (contentTypeLc === 'application/json' || contentTypeLc.startsWith('application/json;')) {
+		const body = await safeLimitedJson(request, MAX_REQUEST_BODY);
+		// Validate: cursor must be a non-empty string (opaque KV pagination token)
+		if (typeof body?.resumeCursor === 'string' && body.resumeCursor.length > 0)
+			cursor = body.resumeCursor;
+		// safeLimitedJson returns null for oversized/malformed input; null body leaves cursor as undefined
 	}
-	
-	// Delete origin and associated keys
-	await env.WICKETGATE_KV.delete(`origin:${slug}`);
-	await Promise.all(keysToDelete.map(k => env.WICKETGATE_KV.delete(k)));
-	
-	return adminJsonResponse(200, { 
+
+	// Scan every page of keys and delete matching ones immediately, page-by-page.
+	// This avoids accumulating an unbounded list of key names in memory for large
+	// namespaces. Per-page deletes are issued in bounded batches (LIST_BATCH_SIZE)
+	// to keep concurrent KV operations predictable.
+	// DELETE_MAX_PAGES caps the total pages scanned to prevent exceeding the Worker's
+	// CPU/wall-clock time limit (30 s free / 15 min paid). If the namespace is larger
+	// than DELETE_MAX_PAGES × LIST_MAX_ENTRIES keys, the caller should retry with the
+	// returned resumeCursor so the scan resumes from where it stopped rather than
+	// restarting from page 1 — origin entry is deleted last so retries are safe.
+	let keysDeleted = 0;
+	let pagesScanned = 0;
+	let truncated = false;
+	let page;
+	// Track whether the current kv.list() call is using a user-supplied cursor.
+	// Only the first iteration may use a user-provided resumeCursor; subsequent
+	// iterations use internally-generated cursors from previous pages.
+	let isUserSuppliedCursor = cursor !== undefined;
+	do {
+		try {
+			page = await env.WICKETGATE_KV.list({ prefix: 'key:', cursor, limit: LIST_MAX_ENTRIES });
+		} catch (err) {
+			// Return 400 only when the failure is attributable to a user-supplied resumeCursor
+			// (invalid or expired token from the request body). For all other cases — no cursor,
+			// or an internally-generated cursor from a previous page — return 500 so the caller
+			// distinguishes a transient KV error from a bad input.
+			if (isUserSuppliedCursor)
+				return secureJsonError(400, 'Invalid resumeCursor.');
+			return secureJsonError(500, 'KV list failed.');
+		}
+		isUserSuppliedCursor = false; // Subsequent iterations use internally-generated cursors
+		try {
+			const keyData = await batchKvFetch(env.WICKETGATE_KV, page.keys, (k, data) => ({
+				name: k.name,
+				origin: data?.origin,
+			}));
+			const pageKeysToDelete = keyData
+				.filter(key => key.origin === slug)
+				.map(key => key.name);
+			for (let i = 0; i < pageKeysToDelete.length; i += LIST_BATCH_SIZE) {
+				const batch = pageKeysToDelete.slice(i, i + LIST_BATCH_SIZE);
+				await Promise.all(batch.map(k => env.WICKETGATE_KV.delete(k)));
+			}
+			keysDeleted += pageKeysToDelete.length;
+		} catch (err) {
+			// batchKvFetch or kv.delete() threw a transient error. Return 500 so the caller
+			// gets a JSON error rather than a platform-level crash.
+			return secureJsonError(500, 'KV operation failed.');
+		}
+		pagesScanned++;
+		cursor = page.list_complete ? undefined : (page.cursor || undefined);
+		if (!page.list_complete && pagesScanned >= DELETE_MAX_PAGES) {
+			truncated = true;
+			break;
+		}
+	} while (!page.list_complete);
+
+	// Delete the origin entry itself last (after all associated keys are removed).
+	// This ordering is intentional: if the operation is interrupted before this line,
+	// the origin still exists and the delete can be retried cleanly. Deleting the
+	// origin first would create orphaned keys that could silently resurrect if a new
+	// origin were created with the same slug.
+	// If the scan was truncated (namespace too large), skip deleting the origin so
+	// the caller can safely retry with the returned resumeCursor — the next call will
+	// resume from where this one stopped rather than rescanning from page 1.
+	if (truncated) {
+		return adminJsonResponse(202, {
+			message: 'Partial delete: namespace too large for a single request. Retry with resumeCursor to continue. Note: keysDeleted reflects this call only, not cumulative progress across retries.',
+			keysDeleted,
+			completed: false,
+			originDeleted: false,
+			truncated: true,
+			pagesScanned,
+			resumeCursor: cursor,
+		});
+	}
+
+	try {
+		await env.WICKETGATE_KV.delete(`origin:${slug}`);
+	} catch {
+		// Transient KV error on the final origin entry removal. Return 500 so the
+		// caller gets a clean JSON error rather than a platform-level crash.
+		// The origin entry still exists, so the caller can retry the full delete.
+		return secureJsonError(500, 'Failed to delete origin entry.');
+	}
+
+	return adminJsonResponse(200, {
 		message: 'Deleted.',
-		keysDeleted: keysToDelete.length 
+		keysDeleted,
+		completed: true,
+		originDeleted: true,
+		truncated: false,
+		pagesScanned,
 	});
 }
 
@@ -543,62 +660,141 @@ async function discoverTunnels(env) {
 		return secureJsonError(500, 'Discovery requires CF_API_TOKEN and CF_ACCOUNT_ID.');
 
 	try {
-		// Fetch all pages of tunnels
+		// Fetch all pages of tunnels. A single AbortController is shared across all
+		// pages of the tunnel-list loop so the budget timer covers the entire phase.
+		// Per-page controllers would allow N × DISCOVER_TIMEOUT_MS cumulative worst-case
+		// which can silently exceed the Worker's 30 s wall-clock limit.
 		let tunnels = [];
 		let page = 1;
 		const perPage = 50;
+		const tunnelAbort = new AbortController();
+		const tunnelTimer = setTimeout(() => tunnelAbort.abort(), DISCOVER_TIMEOUT_MS);
 
-		while (true) {
-			const tunnelsRes = await fetch(
-				`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
-				{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` } }
-			);
-			const tunnelsData = await tunnelsRes.json();
-			if (!tunnelsData.success)
-				return secureJsonError(502, 'Tunnel API error.');
+		try {
+			while (true) {
+				let tunnelsData;
+				try {
+					const tunnelsRes = await fetch(
+						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
+						{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: tunnelAbort.signal }
+					);
+					if (!tunnelsRes.ok) {
+						if (tunnelsRes.status === 429)
+							return secureJsonError(502, 'Tunnel API rate limit reached. Try again later.');
+						return secureJsonError(502, `Tunnel API error (HTTP ${tunnelsRes.status}).`);
+					}
+					// Parse the body inside the try block so the abort signal covers body delivery,
+					// not just time-to-first-byte.
+					tunnelsData = await tunnelsRes.json();
+				} catch (fetchErr) {
+					if (fetchErr?.name === 'AbortError')
+						return secureJsonError(502, 'Tunnel API timed out. Try again later.');
+					throw fetchErr;
+				}
 
-			const batch = tunnelsData.result || [];
-			tunnels = tunnels.concat(batch);
+				if (!tunnelsData.success)
+					return secureJsonError(502, 'Tunnel API error.');
 
-			// Check if there are more pages using result_info
-			const resultInfo = tunnelsData.result_info || {};
-			const hasMore = resultInfo.total_pages && page < resultInfo.total_pages;
+				const batch = tunnelsData.result || [];
+				tunnels = tunnels.concat(batch);
 
-			if (!hasMore || batch.length === 0) break;
+				// Check if there are more pages using result_info.
+				// Fall back to batch.length > 0 when total_pages is absent so the loop
+				// does not stop after the first page on non-paginated responses or if the
+				// CF API omits result_info entirely (e.g., an API version change).
+				const resultInfo = tunnelsData.result_info || {};
+				const hasMore = typeof resultInfo.total_pages === 'number'
+					? page < resultInfo.total_pages
+					: batch.length > 0;
 
-			page++;
+				if (!hasMore || batch.length === 0) break;
 
-			// Safety limit to prevent infinite loops (max 5000 tunnels)
-			if (page > 100) break;
+				page++;
+
+				// Safety limit to prevent infinite loops (max 5000 tunnels)
+				if (page > 100) break;
+			}
+		} finally {
+			clearTimeout(tunnelTimer);
 		}
 
 		// Fetch tunnel configurations with bounded concurrency to avoid rate-limiting
-		// and keep Wall-clock time predictable.
+		// and keep Wall-clock time predictable. Per-tunnel failures are tolerated and
+		// noted in the warnings list so the caller knows the result may be incomplete.
+		//
+		// Guard the entire config-fetch phase with an outer shared AbortController so
+		// that if all fetches in a batch saturate their per-tunnel DISCOVER_TIMEOUT_MS
+		// budget, sequential batches do not accumulate beyond the Worker wall-clock
+		// limit (~30 s). Budget: 2× DISCOVER_TIMEOUT_MS (20 s) leaves headroom for two
+		// full worst-case batches; remaining tunnels are skipped and added to warnings.
 		const hostnames = [];
-		for (let i = 0; i < tunnels.length; i += TUNNEL_FETCH_CONCURRENCY) {
-			const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
-			await Promise.allSettled(
-				batch.map(async (tunnel) => {
-					const cfgRes = await fetch(
-						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
-						{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` } }
-					);
-					const cfgData = await cfgRes.json();
-					if (cfgData.success && cfgData.result?.config?.ingress) {
-						for (const rule of cfgData.result.config.ingress) {
-							if (rule.hostname) {
-								hostnames.push({
-									hostname: rule.hostname,
-									tunnelName: tunnel.name,
-									// Intentionally omit rule.service — it exposes internal network topology
-									suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
-								});
+		const warnings = [];
+		const cfgPhaseAbort = new AbortController();
+		const cfgPhaseTimer = setTimeout(() => cfgPhaseAbort.abort(), DISCOVER_TIMEOUT_MS * 2);
+		try {
+			for (let i = 0; i < tunnels.length; i += TUNNEL_FETCH_CONCURRENCY) {
+				// If the phase budget is exhausted, skip remaining batches and record a warning
+				if (cfgPhaseAbort.signal.aborted) {
+					const remaining = tunnels.length - i;
+					warnings.push(`Config-fetch phase budget exhausted; ${remaining} tunnel(s) not fetched.`);
+					break;
+				}
+				const batch = tunnels.slice(i, i + TUNNEL_FETCH_CONCURRENCY);
+				await Promise.allSettled(
+					batch.map(async (tunnel) => {
+						try {
+							const cfgAbort = new AbortController();
+							const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
+							try {
+								const cfgRes = await fetch(
+									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
+									{
+										headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` },
+										// Combine per-tunnel and phase signals so the phase deadline can abort
+										// fetches that are still in-flight when cfgPhaseTimer fires, not just
+										// prevent new batches from starting.
+										signal: AbortSignal.any([cfgAbort.signal, cfgPhaseAbort.signal]),
+									}
+								);
+								if (!cfgRes.ok) {
+									warnings.push(`Tunnel "${tunnel.name}" config fetch failed (HTTP ${cfgRes.status}).`);
+									return;
+								}
+								// Parse the body inside the try block so the abort signal covers body delivery,
+								// not just time-to-first-byte.
+								const cfgData = await cfgRes.json();
+								if (cfgData.success && cfgData.result?.config?.ingress) {
+									for (const rule of cfgData.result.config.ingress) {
+										if (rule.hostname) {
+											hostnames.push({
+												hostname: rule.hostname,
+												tunnelName: tunnel.name,
+												// Intentionally omit rule.service — it exposes internal network topology
+												suggestedSlug: rule.hostname.split('.')[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, MAX_SLUG_LENGTH),
+											});
+										}
+									}
+								} else if (!cfgData.success) {
+									warnings.push(`Tunnel "${tunnel.name}" returned an API error.`);
+								}
+							} finally {
+								clearTimeout(cfgTimer);
 							}
+						} catch (err) {
+							let msg;
+							if (err?.name === 'AbortError') {
+								msg = `Tunnel "${tunnel.name}" config fetch timed out.`;
+							} else {
+								msg = `Tunnel "${tunnel.name}" config fetch failed due to an exception: ${err instanceof Error ? err.message : String(err)}`;
+							}
+							warnings.push(msg);
 						}
-					}
-				})
-			);
-			// Per-tunnel failures are tolerated; the tunnel is simply omitted from results
+					})
+				);
+				// Per-tunnel failures are recorded in warnings; the tunnel is omitted from results
+			}
+		} finally {
+			clearTimeout(cfgPhaseTimer);
 		}
 
 		// If no hostnames were discovered, there's nothing to check against KV.
@@ -606,6 +802,7 @@ async function discoverTunnels(env) {
 		if (hostnames.length === 0) {
 			return adminJsonResponse(200, {
 				hostnames: [],
+				...(warnings.length > 0 ? { warnings } : {}),
 			});
 		}
 
@@ -637,6 +834,7 @@ async function discoverTunnels(env) {
 				...h,
 				configured: configuredHostnames.has(h.hostname.toLowerCase()),
 			})),
+			...(warnings.length > 0 ? { warnings } : {}),
 		});
 	} catch (err) {
 		return secureJsonError(502, 'Discovery failed.');

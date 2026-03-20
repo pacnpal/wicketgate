@@ -25,7 +25,7 @@ type = "Text"
 globs = ["**/*.html"]
 
 # [vars]
-# ALLOW_UNAUTH_ADMIN = "true"   ← uncomment to skip auth (dev only!)
+# ALLOW_UNAUTH_ADMIN = "true"   ← uncomment only when /admin* is externally gated (e.g. Cloudflare Access)
 
 # [[kv_namespaces]]
 # binding = "WICKETGATE_KV"
