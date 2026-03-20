@@ -83,7 +83,7 @@ export default {
 				status: 204,
 				headers: {
 					'Access-Control-Allow-Origin': url.origin,
-					'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+					'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
 					'Access-Control-Allow-Headers': 'Authorization, Content-Type',
 					'Access-Control-Max-Age': '86400',
 					...SECURITY_HEADERS,
@@ -523,7 +523,7 @@ async function replaceOrigin(slug, request, env) {
 			return secureJsonError(400, 'Invalid label.');
 	}
 
-	const normalizedLabel = (label !== undefined && label !== null) ? label : slug;
+	const normalizedLabel = (label !== undefined && label !== null && label !== '') ? label : slug;
 	const replaced = {
 		hostname: normalizedHostname,
 		serviceTokenId,
