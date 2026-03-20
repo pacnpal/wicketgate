@@ -144,7 +144,7 @@ git clone https://github.com/pacnpal/wicketgate.git
 cd wicketgate
 ```
 
-Or download and unzip the repository. The project is four files:
+Or download and unzip the repository. The project layout is simple:
 
 ```
 wicketgate/
@@ -256,7 +256,7 @@ No local tooling required — everything is done in your browser.
 
 #### Step 1: Get the worker code
 
-Download `src/worker.js` from the [Wicketgate repository](https://github.com/pacnpal/wicketgate). You only need this one file to deploy.
+Download both `src/worker.js` and `src/dashboard.html` from the [Wicketgate repository](https://github.com/pacnpal/wicketgate). Both files are required — `worker.js` imports `dashboard.html` to serve the admin UI.
 
 #### Step 2: Create the Worker
 
@@ -268,7 +268,8 @@ Download `src/worker.js` from the [Wicketgate repository](https://github.com/pac
 6. On the success screen click **Edit code**
 7. In the code editor, select all existing code and delete it
 8. Paste the entire contents of `src/worker.js`
-9. Click **Deploy** in the top-right to save and publish
+9. In the file list on the left of the editor, click **+** (Add file), name it `dashboard.html`, and paste the entire contents of `src/dashboard.html`
+10. Click **Deploy** in the top-right to save and publish
 
 Your Worker is now live at `wicketgate.YOUR_SUBDOMAIN.workers.dev`.
 
@@ -328,21 +329,21 @@ A custom domain lets you put the admin dashboard behind Cloudflare Access, and g
 
 ### Step 7: Protect the dashboard
 
-The dashboard requires authentication. There are two options:
+The dashboard requires authentication. You can either use Wicketgate's built-in admin secret, or delegate auth to Cloudflare Access.
 
-**Option A — ADMIN_SECRET (always required unless using Option B):**
+**Default mode — ADMIN_SECRET (required when `ALLOW_UNAUTH_ADMIN` is not `true`):**
 
-Set an `ADMIN_SECRET` following the instructions in your chosen installation option above (CLI Step 4 or Web UI Step 5).
+Set an `ADMIN_SECRET` following the instructions in your chosen installation option above (CLI Step 4 or Web UI Step 5). This secret will be required to access `/admin` and `/admin/*` as long as `ALLOW_UNAUTH_ADMIN` is not set to `"true"`.
 
-**Option B — Cloudflare Access (external gate) instead of ADMIN_SECRET:**
+**Alternative mode — Cloudflare Access (external gate with `ALLOW_UNAUTH_ADMIN=true`):**
 
-If you're using a custom domain, you can put the dashboard behind Cloudflare Access and skip the built-in secret by setting `ALLOW_UNAUTH_ADMIN=true`:
+If you're using a custom domain, you can put the dashboard behind Cloudflare Access and skip the built-in `ADMIN_SECRET` check by setting `ALLOW_UNAUTH_ADMIN=true`:
 
 1. Go to Zero Trust → Access → Applications → Add an application
 2. Choose **Self-hosted**
 3. Configure:
    - **Application name**: Wicketgate Admin
-   - **Subdomain**: `broker` | **Domain**: `yourdomain.com`
+   - **Subdomain**: `wicketgate` | **Domain**: `yourdomain.com`
    - **Path**: `admin`
 4. Add a policy:
    - **Action**: Allow
