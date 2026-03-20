@@ -574,7 +574,7 @@ async function deleteOrigin(slug, request, env) {
 	// resume from where this one stopped rather than rescanning from page 1.
 	if (truncated) {
 		return adminJsonResponse(202, {
-			message: 'Partial delete: namespace too large for a single request. Retry with resumeCursor to continue.',
+			message: 'Partial delete: namespace too large for a single request. Retry with resumeCursor to continue. Note: keysDeleted reflects this call only, not cumulative progress across retries.',
 			keysDeleted,
 			completed: false,
 			originDeleted: false,
@@ -748,7 +748,13 @@ async function discoverTunnels(env) {
 							try {
 								const cfgRes = await fetch(
 									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
-									{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: cfgAbort.signal }
+									{
+										headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` },
+										// Combine per-tunnel and phase signals so the phase deadline can abort
+										// fetches that are still in-flight when cfgPhaseTimer fires, not just
+										// prevent new batches from starting.
+										signal: AbortSignal.any([cfgAbort.signal, cfgPhaseAbort.signal]),
+									}
 								);
 								if (!cfgRes.ok) {
 									warnings.push(`Tunnel "${tunnel.name}" config fetch failed (HTTP ${cfgRes.status}).`);
