@@ -529,7 +529,23 @@ curl -X POST https://wicketgate.yourdomain.com/admin/origins \
 | `serviceTokenSecret` | Yes | CF-Access-Client-Secret. |
 | `label` | No | Friendly name for the dashboard. Defaults to the slug. |
 
-#### Update origin
+#### Update origin (partial)
+
+```
+PATCH /admin/origins/{slug}
+Content-Type: application/json
+```
+
+```bash
+curl -X PATCH https://wicketgate.yourdomain.com/admin/origins/jellyfin \
+  -H "Authorization: Bearer YOUR_ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "Jellyfin (new name)"}'
+```
+
+Only include fields you want to change. To clear the label, pass `"label": ""`.
+
+#### Replace origin (full)
 
 ```
 PUT /admin/origins/{slug}
@@ -540,10 +556,10 @@ Content-Type: application/json
 curl -X PUT https://wicketgate.yourdomain.com/admin/origins/jellyfin \
   -H "Authorization: Bearer YOUR_ADMIN_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"label": "Jellyfin (new name)"}'
+  -d '{"hostname": "jellyfin.example.com", "serviceTokenId": "id", "serviceTokenSecret": "secret", "label": "Jellyfin"}'
 ```
 
-Only include fields you want to change.
+Replaces the entire origin record. `hostname`, `serviceTokenId`, and `serviceTokenSecret` are all required. `label` is optional (defaults to the slug). The `created` timestamp is preserved.
 
 #### Delete origin
 
