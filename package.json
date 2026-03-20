@@ -1,0 +1,15 @@
+{
+  "name": "wicketgate",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker that brokers access to any service behind a Cloudflare Tunnel + Access policy. Supports multiple origins, scoped client tokens, and auto-discovery of tunnel hostnames.",
+  "private": true,
+  "scripts": {
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "tail": "npx wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3"
+  },
+  "license": "Unlicense"
+}

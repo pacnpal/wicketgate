@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────
+# Wicketgate
+# ─────────────────────────────────────────────────────────────────────
+#
+# 1. Create KV:   npx wrangler kv namespace create WICKETGATE_KV
+#    Paste the ID below.
+#
+# 2. Secrets:
+#    npx wrangler secret put ADMIN_SECRET           # required (or set ALLOW_UNAUTH_ADMIN=true)
+#    npx wrangler secret put CF_API_TOKEN      # optional, for discovery
+#    npx wrangler secret put CF_ACCOUNT_ID     # optional, for discovery
+#
+# 3. Deploy:      npx wrangler deploy
+#
+# 4. Custom domain + Access policy on /admin* (see README)
+#
+# ─────────────────────────────────────────────────────────────────────
+
+name = "wicketgate"
+main = "src/worker.js"
+compatibility_date = "2024-12-01"
+
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+
+# [vars]
+# ALLOW_UNAUTH_ADMIN = "true"   ← uncomment only when /admin* is externally gated (e.g. Cloudflare Access)
+
+# [[kv_namespaces]]
+# binding = "WICKETGATE_KV"
+# id = "YOUR_KV_NAMESPACE_ID_HERE"   ← paste the ID from step 1, then uncomment
+
+# [[routes]]
+# pattern = "wicketgate.yourdomain.com/*"
+# zone_name = "yourdomain.com"

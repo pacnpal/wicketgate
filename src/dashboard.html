@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wicketgate</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0}
+:root{
+  --bg:#0e0f11;--surface:#16181c;--surface2:#1e2025;--border:#2a2d35;
+  --text:#e2e4e9;--text2:#9a9da6;--accent:#6c8cff;--accent-dim:#3d4f8a;
+  --danger:#e5534b;--danger-dim:#5c2220;--success:#3fb950;--success-dim:#1a3524;
+  --warn:#d29922;--warn-dim:#3d2e0a;
+  --mono:"SF Mono","Cascadia Code","Fira Code",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  --radius:8px;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);padding:0;min-height:100vh;line-height:1.5}
+.wrap{max-width:740px;margin:0 auto;padding:24px 16px 80px}
+h1{font-size:20px;font-weight:600;margin-bottom:4px}
+h2{font-size:15px;font-weight:600;margin-bottom:12px}
+.subtitle{color:var(--text2);font-size:13px;margin-bottom:28px}
+label{display:block;font-size:12px;color:var(--text2);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;font-weight:500}
+input[type="text"],input[type="password"],select{
+  width:100%;padding:10px 12px;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);color:var(--text);font-size:14px;font-family:var(--sans);outline:none;transition:border-color .15s;
+}
+input:focus,select:focus{border-color:var(--accent)}
+input::placeholder{color:#555}
+select{cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%239a9da6'%3E%3Cpath d='M2 4l4 4 4-4'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+select option{background:var(--surface);color:var(--text)}
+.row{display:flex;gap:10px;align-items:flex-end}
+.field{flex:1}
+button{padding:10px 16px;border-radius:var(--radius);border:none;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;font-family:var(--sans);white-space:nowrap}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#5a7ae6}
+.btn-primary:disabled{opacity:.4;cursor:not-allowed}
+.btn-danger{background:var(--danger-dim);color:var(--danger)}
+.btn-danger:hover{background:#6e2a27}
+.btn-sm{padding:6px 10px;font-size:12px}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border)}
+.btn-ghost:hover{background:var(--surface2);color:var(--text)}
+.btn-success{background:var(--success-dim);color:var(--success)}
+.btn-success:hover{background:#1f4a2b}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px}
+.section{margin-bottom:32px}
+.section-header{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.badge{font-size:11px;padding:2px 8px;border-radius:99px;font-weight:500}
+.badge-active{background:var(--success-dim);color:var(--success)}
+.badge-origin{background:var(--accent-dim);color:var(--accent);font-family:var(--mono);font-size:10px}
+.key-name{font-weight:600;font-size:14px}
+.key-meta{font-size:12px;color:var(--text2);margin-top:2px}
+.key-actions{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap}
+.origin-label{font-weight:600;font-size:14px}
+.origin-hostname{font-family:var(--mono);font-size:12px;color:var(--text2)}
+.url-box{
+  font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--border);
+  border-radius:6px;padding:8px 10px;word-break:break-all;color:var(--text2);
+  margin-top:8px;position:relative;cursor:pointer;transition:border-color .15s;
+}
+.url-box:hover{border-color:var(--accent)}
+.url-label{color:var(--text);font-family:var(--sans);font-size:11px;font-weight:500;display:block;margin-bottom:4px}
+.copied-badge{position:absolute;right:8px;top:8px;font-size:11px;color:var(--success);font-family:var(--sans);opacity:0;transition:opacity .2s}
+.copied-badge.show{opacity:1}
+.empty{color:var(--text2);font-size:13px;padding:20px;text-align:center}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 20px;font-size:13px;opacity:0;transition:opacity .3s;pointer-events:none;z-index:10}
+.toast.show{opacity:1}
+.login-card{max-width:360px;margin:80px auto 0}
+.login-card h1{text-align:center;margin-bottom:16px}
+.err{color:var(--danger);font-size:12px;margin-top:8px;display:none}
+.err.show{display:block}
+.created-result{margin-top:16px;display:none}
+.created-result.show{display:block}
+.created-result .key-display{font-family:var(--mono);font-size:13px;background:var(--bg);border:1px solid var(--success);border-radius:6px;padding:10px 12px;word-break:break-all;color:var(--success);margin:8px 0}
+.created-result .warning{font-size:12px;color:var(--warn);margin-bottom:4px}
+.divider{border:none;border-top:1px solid var(--border);margin:16px 0}
+details summary{font-size:12px;color:var(--text2);cursor:pointer;margin-top:8px}
+details summary:hover{color:var(--text)}
+.discover-item{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
+.discover-item:last-child{border-bottom:none}
+.discover-hostname{font-family:var(--mono);font-size:13px}
+.discover-tunnel{font-size:11px;color:var(--text2)}
+.tab-bar{display:flex;gap:2px;margin-bottom:24px;border-bottom:1px solid var(--border)}
+.tab{padding:8px 16px;font-size:13px;font-weight:500;cursor:pointer;color:var(--text2);border-bottom:2px solid transparent;transition:all .15s;background:none;border-radius:0}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.hidden{display:none!important}
+@media(max-width:560px){.row{flex-direction:column}.key-actions{flex-direction:column}.key-actions button{width:100%}.discover-item{flex-direction:column;align-items:flex-start;gap:8px}}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-view" class="wrap">
+  <div class="login-card card">
+    <h1>Wicketgate</h1>
+    <p style="text-align:center;color:var(--text2);font-size:13px;margin-bottom:16px">Manage access to your tunnel services.</p>
+    <div style="margin-bottom:12px">
+      <label for="admin-key">Admin secret</label>
+      <input type="password" id="admin-key" placeholder="Paste your ADMIN_SECRET">
+    </div>
+    <button class="btn-primary" style="width:100%" id="login-btn">Sign in</button>
+    <div id="login-err" class="err"></div>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div id="main-view" class="wrap hidden">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+    <h1>Wicketgate</h1>
+    <button class="btn-ghost btn-sm" id="logout-btn">Sign out</button>
+  </div>
+  <div class="subtitle">Create opaque access links for your tunnel services</div>
+
+  <div class="tab-bar">
+    <button class="tab active" data-tab="keys">Access keys</button>
+    <button class="tab" data-tab="origins">Origins</button>
+    <button class="tab" data-tab="discover">Discover</button>
+  </div>
+
+  <!-- Keys tab -->
+  <div id="tab-keys" class="tab-panel active">
+    <div class="section">
+      <h2>Create an access key</h2>
+      <div class="card">
+        <div class="row" style="margin-bottom:10px">
+          <div class="field">
+            <label for="key-name">Who is this for?</label>
+            <input type="text" id="key-name" placeholder='e.g. "Dad phone", "living room tablet"'>
+          </div>
+          <div class="field">
+            <label for="key-origin">Service</label>
+            <select id="key-origin"><option value="">Loading...</option></select>
+          </div>
+        </div>
+        <button class="btn-primary" id="create-key-btn">Generate link</button>
+        <div id="created-result" class="created-result"></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-header">
+        <h2 style="margin:0">Active keys</h2>
+        <span id="key-count" class="badge badge-active">0</span>
+      </div>
+      <div id="key-list"><div class="empty">Loading...</div></div>
+    </div>
+  </div>
+
+  <!-- Origins tab -->
+  <div id="tab-origins" class="tab-panel">
+    <div class="section">
+      <h2>Add an origin</h2>
+      <div class="card">
+        <div class="row" style="margin-bottom:10px">
+          <div class="field">
+            <label for="origin-slug">Slug</label>
+            <input type="text" id="origin-slug" placeholder="e.g. jellyfin">
+          </div>
+          <div class="field">
+            <label for="origin-label">Label</label>
+            <input type="text" id="origin-label" placeholder="e.g. Media server">
+          </div>
+        </div>
+        <div style="margin-bottom:10px">
+          <label for="origin-hostname">Hostname</label>
+          <input type="text" id="origin-hostname" placeholder="e.g. jellyfin.yourdomain.com">
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <div class="field">
+            <label for="origin-st-id">Service token ID</label>
+            <input type="text" id="origin-st-id" placeholder="CF-Access-Client-Id">
+          </div>
+          <div class="field">
+            <label for="origin-st-secret">Service token secret</label>
+            <input type="password" id="origin-st-secret" placeholder="CF-Access-Client-Secret">
+          </div>
+        </div>
+        <button class="btn-primary" id="add-origin-btn">Add origin</button>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-header">
+        <h2 style="margin:0">Configured origins</h2>
+        <span id="origin-count" class="badge badge-active">0</span>
+      </div>
+      <div id="origin-list"><div class="empty">Loading...</div></div>
+    </div>
+  </div>
+
+  <!-- Discover tab -->
+  <div id="tab-discover" class="tab-panel">
+    <div class="section">
+      <h2>Tunnel discovery</h2>
+      <p style="color:var(--text2);font-size:13px;margin-bottom:12px">
+        Pull hostnames from your Cloudflare Tunnels. Requires CF_API_TOKEN and CF_ACCOUNT_ID.
+      </p>
+      <button class="btn-primary" id="discover-btn">Discover hostnames</button>
+      <div id="discover-results" style="margin-top:16px"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+(function() {
+  var BASE = location.origin;
+  var adminSecret = '';
+  var originsCache = [];
+
+  // Tabs
+  document.querySelectorAll('.tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+      document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
+      tab.classList.add('active');
+      document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  // Login
+  var loginView = document.getElementById('login-view');
+  var mainView = document.getElementById('main-view');
+  var loginBtn = document.getElementById('login-btn');
+  var loginErr = document.getElementById('login-err');
+  var adminKeyInput = document.getElementById('admin-key');
+
+  var authRequired = true;
+
+  // Check if the worker requires built-in auth
+  (async function init() {
+    try {
+      var res = await fetch(BASE + '/admin/auth-mode');
+      var data = await res.json();
+      authRequired = data.authRequired;
+    } catch(e) { authRequired = true; }
+
+    if (!authRequired) {
+      // No built-in auth — skip login, go straight to dashboard
+      loginView.classList.add('hidden');
+      mainView.classList.remove('hidden');
+      document.getElementById('logout-btn').classList.add('hidden');
+      await refreshAll();
+    }
+  })();
+
+  loginBtn.addEventListener('click', doLogin);
+  adminKeyInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin(); });
+  document.getElementById('logout-btn').addEventListener('click', function() {
+    adminSecret = '';
+    mainView.classList.add('hidden');
+    loginView.classList.remove('hidden');
+    adminKeyInput.value = '';
+    loginErr.classList.remove('show');
+  });
+
+  async function doLogin() {
+    adminSecret = adminKeyInput.value.trim();
+    if (!adminSecret) return;
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Signing in...';
+    loginErr.classList.remove('show');
+    var ok = await refreshAll();
+    loginBtn.disabled = false;
+    loginBtn.textContent = 'Sign in';
+    if (ok) { loginView.classList.add('hidden'); mainView.classList.remove('hidden'); }
+    else { loginErr.textContent = 'Invalid admin secret or server error.'; loginErr.classList.add('show'); }
+  }
+
+  async function refreshAll() {
+    var ok = await fetchOrigins();
+    if (!ok) return false;
+    await fetchKeys();
+    return true;
+  }
+
+  // API — includes bearer token if auth is required
+  async function api(method, path, body) {
+    var headers = { 'Content-Type': 'application/json' };
+    if (adminSecret) headers['Authorization'] = 'Bearer ' + adminSecret;
+    var opts = { method: method, headers: headers };
+    if (body) opts.body = JSON.stringify(body);
+    var res = await fetch(BASE + path, opts);
+    return { ok: res.ok, status: res.status, data: await res.json() };
+  }
+
+  // ═══ ORIGINS ═══
+
+  async function fetchOrigins() {
+    try {
+      var res = await api('GET', '/admin/origins');
+      if (!res.ok) return false;
+      originsCache = res.data.origins || [];
+      renderOrigins(originsCache, res.data.hasMore);
+      renderOriginSelect(originsCache);
+      return true;
+    } catch(e) { return false; }
+  }
+
+  function renderOrigins(origins, hasMore) {
+    var list = document.getElementById('origin-list');
+    document.getElementById('origin-count').textContent = origins.length + (hasMore ? '+' : '');
+    if (origins.length === 0) { list.innerHTML = '<div class="empty">No origins yet. Add one above or use Discover.</div>'; return; }
+    list.innerHTML = '';
+    origins.forEach(function(o) {
+      var card = document.createElement('div');
+      card.className = 'card';
+      var header = document.createElement('div');
+      header.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
+      header.innerHTML = '<div><div class="origin-label">' + esc(o.label || o.slug) + '</div><div style="display:flex;gap:8px;align-items:center;margin-top:2px"><span class="badge badge-origin">' + esc(o.slug) + '</span><span class="origin-hostname">' + esc(o.hostname) + '</span></div></div>';
+      var del = document.createElement('button');
+      del.className = 'btn-danger btn-sm';
+      del.textContent = 'Remove';
+      del.addEventListener('click', function() { deleteOrigin(o.slug, o.label || o.slug); });
+      header.appendChild(del);
+      card.appendChild(header);
+      list.appendChild(card);
+    });
+    if (hasMore) {
+      var notice = document.createElement('div');
+      notice.className = 'card';
+      notice.style.cssText = 'color:var(--warn);font-size:12px;text-align:center';
+      notice.textContent = 'Showing first ' + origins.length + ' origins. To manage additional origins, use the Cloudflare KV dashboard or wrangler CLI.';
+      list.appendChild(notice);
+    }
+  }
+
+  function renderOriginSelect(origins) {
+    var sel = document.getElementById('key-origin');
+    sel.innerHTML = '';
+    if (origins.length === 0) {
+      var opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No origins configured';
+      sel.appendChild(opt);
+      return;
+    }
+    origins.forEach(function(o) {
+      var opt = document.createElement('option');
+      opt.value = o.slug;
+      opt.textContent = o.label || o.slug;
+      sel.appendChild(opt);
+    });
+  }
+
+  document.getElementById('add-origin-btn').addEventListener('click', async function() {
+    var slug = document.getElementById('origin-slug').value.trim();
+    var label = document.getElementById('origin-label').value.trim();
+    var hostname = document.getElementById('origin-hostname').value.trim();
+    var stId = document.getElementById('origin-st-id').value.trim();
+    var stSecret = document.getElementById('origin-st-secret').value.trim();
+    if (!slug || !hostname || !stId || !stSecret) { toast('All fields except label are required.', true); return; }
+    var btn = this; btn.disabled = true;
+    try {
+      var res = await api('POST', '/admin/origins', { slug: slug, hostname: hostname, label: label || slug, serviceTokenId: stId, serviceTokenSecret: stSecret });
+      if (res.ok) {
+        toast('Origin "' + slug + '" added');
+        ['origin-slug','origin-label','origin-hostname','origin-st-id','origin-st-secret'].forEach(function(id) { document.getElementById(id).value = ''; });
+        await fetchOrigins();
+      } else { toast(res.data.error || 'Failed', true); }
+    } catch(e) { toast('Network error', true); }
+    finally { btn.disabled = false; }
+  });
+
+  async function deleteOrigin(slug, label) {
+    if (!confirm('Remove origin "' + label + '"?\n\nExisting keys for this origin will stop working.')) return;
+    try {
+      var res = await api('DELETE', '/admin/origins/' + encodeURIComponent(slug));
+      if (res.ok) { toast('Origin removed'); await refreshAll(); }
+      else toast(res.data.error || 'Failed', true);
+    } catch(e) { toast('Network error', true); }
+  }
+
+  // ═══ KEYS ═══
+
+  async function fetchKeys() {
+    try {
+      var res = await api('GET', '/admin/keys');
+      if (!res.ok) return;
+      renderKeys(res.data.keys || [], res.data.hasMore);
+    } catch(e) {}
+  }
+
+  function renderKeys(keys, hasMore) {
+    var list = document.getElementById('key-list');
+    document.getElementById('key-count').textContent = keys.length + (hasMore ? '+' : '');
+    if (keys.length === 0) { list.innerHTML = '<div class="empty">No access keys yet. Create one above.</div>'; return; }
+    list.innerHTML = '';
+    keys.forEach(function(k) {
+      var card = document.createElement('div');
+      card.className = 'card';
+      var created = k.created ? new Date(k.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Unknown';
+      var shareUrl = BASE + '/s/' + encodeURIComponent(k.key) + '/';
+
+      // Header
+      var header = document.createElement('div');
+      header.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
+      header.innerHTML = '<div><div class="key-name">' + esc(k.name || 'unnamed') + '</div><div class="key-meta">Created ' + esc(created) + ' &middot; <span class="badge badge-origin">' + esc(k.origin) + '</span></div></div><span class="badge badge-active">active</span>';
+      card.appendChild(header);
+
+      // URL
+      card.appendChild(makeUrlBox('Share this link', shareUrl));
+
+      // Actions
+      var actions = document.createElement('div');
+      actions.className = 'key-actions';
+      var copyBtn = document.createElement('button');
+      copyBtn.className = 'btn-ghost btn-sm';
+      copyBtn.textContent = 'Copy link';
+      copyBtn.addEventListener('click', (function(u) { return function() { copyToClipboard(u); }; })(shareUrl));
+      actions.appendChild(copyBtn);
+      var revokeBtn = document.createElement('button');
+      revokeBtn.className = 'btn-danger btn-sm';
+      revokeBtn.textContent = 'Revoke';
+      revokeBtn.addEventListener('click', (function(key, name) { return function() { revokeKey(key, name); }; })(k.key, k.name || 'unnamed'));
+      actions.appendChild(revokeBtn);
+      card.appendChild(actions);
+      list.appendChild(card);
+    });
+    if (hasMore) {
+      var notice = document.createElement('div');
+      notice.className = 'card';
+      notice.style.cssText = 'color:var(--warn);font-size:12px;text-align:center';
+      notice.textContent = 'Showing first ' + keys.length + ' keys. To manage additional keys, use the Cloudflare KV dashboard or wrangler CLI.';
+      list.appendChild(notice);
+    }
+  }
+
+  document.getElementById('create-key-btn').addEventListener('click', async function() {
+    var name = document.getElementById('key-name').value.trim() || 'unnamed';
+    var origin = document.getElementById('key-origin').value;
+    if (!origin) { toast('Select a service.', true); return; }
+    var btn = this; btn.disabled = true; btn.textContent = 'Generating...';
+    try {
+      var res = await api('POST', '/admin/keys', { name: name, origin: origin });
+      if (!res.ok) { toast(res.data.error || 'Failed', true); return; }
+      var shareUrl = BASE + '/s/' + encodeURIComponent(res.data.key) + '/';
+      var cr = document.getElementById('created-result');
+      cr.classList.add('show');
+      cr.innerHTML = '';
+      var hr = document.createElement('hr'); hr.className = 'divider'; cr.appendChild(hr);
+      var warn = document.createElement('div'); warn.className = 'warning'; warn.textContent = 'This link contains the access key. Save it now \u2014 it won\u0027t be shown again.'; cr.appendChild(warn);
+      cr.appendChild(makeUrlBox('Share this link', shareUrl));
+      var copyBtn = document.createElement('button');
+      copyBtn.className = 'btn-primary btn-sm';
+      copyBtn.style.cssText = 'margin-top:10px;width:100%';
+      copyBtn.textContent = 'Copy link to clipboard';
+      copyBtn.addEventListener('click', function() { copyToClipboard(shareUrl); });
+      cr.appendChild(copyBtn);
+      document.getElementById('key-name').value = '';
+      await fetchKeys();
+      toast('Access key created for "' + name + '"');
+    } catch(e) { toast('Network error', true); }
+    finally { btn.disabled = false; btn.textContent = 'Generate link'; }
+  });
+
+  async function revokeKey(key, name) {
+    if (!confirm('Revoke access for "' + name + '"?\n\nTheir link will stop working immediately.')) return;
+    try {
+      var res = await api('DELETE', '/admin/keys/' + encodeURIComponent(key));
+      if (res.ok) { toast('Access revoked'); await fetchKeys(); }
+      else toast(res.data.error || 'Failed', true);
+    } catch(e) { toast('Network error', true); }
+  }
+
+  // ═══ DISCOVER ═══
+
+  document.getElementById('discover-btn').addEventListener('click', async function() {
+    var btn = this;
+    var results = document.getElementById('discover-results');
+    btn.disabled = true; btn.textContent = 'Discovering...';
+    results.innerHTML = '<div class="empty">Querying Cloudflare API...</div>';
+    try {
+      var res = await api('GET', '/admin/discover');
+      if (!res.ok) { results.innerHTML = '<div class="card" style="border-color:var(--danger)"><span style="color:var(--danger)">' + esc(res.data.error || 'Failed') + '</span></div>'; return; }
+      var hostnames = res.data.hostnames || [];
+      if (hostnames.length === 0) { results.innerHTML = '<div class="empty">No tunnel hostnames found.</div>'; return; }
+      results.innerHTML = '';
+      var card = document.createElement('div'); card.className = 'card';
+      hostnames.forEach(function(h) {
+        var item = document.createElement('div'); item.className = 'discover-item';
+        var info = document.createElement('div');
+        info.innerHTML = '<div class="discover-hostname">' + esc(h.hostname) + '</div><div class="discover-tunnel">Tunnel: ' + esc(h.tunnelName) + '</div>';
+        item.appendChild(info);
+        if (h.configured) {
+          var badge = document.createElement('span'); badge.className = 'badge badge-active'; badge.textContent = 'configured'; item.appendChild(badge);
+        } else {
+          var addBtn = document.createElement('button'); addBtn.className = 'btn-success btn-sm'; addBtn.textContent = 'Add as origin';
+          addBtn.addEventListener('click', function() {
+            document.querySelector('[data-tab="origins"]').click();
+            document.getElementById('origin-slug').value = h.suggestedSlug;
+            document.getElementById('origin-hostname').value = h.hostname;
+            document.getElementById('origin-label').value = h.hostname.split('.')[0];
+            document.getElementById('origin-st-id').focus();
+            toast('Prefilled \u2014 add your service token credentials');
+          });
+          item.appendChild(addBtn);
+        }
+        card.appendChild(item);
+      });
+      results.appendChild(card);
+    } catch(e) { results.innerHTML = '<div class="card" style="border-color:var(--danger)"><span style="color:var(--danger)">Network error</span></div>'; }
+    finally { btn.disabled = false; btn.textContent = 'Discover hostnames'; }
+  });
+
+  // ═══ HELPERS ═══
+
+  function makeUrlBox(label, value) {
+    var box = document.createElement('div'); box.className = 'url-box';
+    var lbl = document.createElement('span'); lbl.className = 'url-label'; lbl.textContent = label; box.appendChild(lbl);
+    box.appendChild(document.createTextNode(value));
+    var badge = document.createElement('span'); badge.className = 'copied-badge'; badge.textContent = 'Copied!'; box.appendChild(badge);
+    box.addEventListener('click', function() { copyToClipboard(value); badge.classList.add('show'); setTimeout(function() { badge.classList.remove('show'); }, 1200); });
+    return box;
+  }
+
+  function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(function() { toast('Copied to clipboard'); }).catch(function() {
+      var ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); toast('Copied to clipboard');
+    });
+  }
+
+  var toastEl = document.getElementById('toast');
+  function toast(msg, isErr) {
+    toastEl.textContent = msg; toastEl.style.borderColor = isErr ? 'var(--danger)' : 'var(--border)';
+    toastEl.classList.add('show'); setTimeout(function() { toastEl.classList.remove('show'); }, 2200);
+  }
+
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+})();
+</script>
+</body>
+</html>
