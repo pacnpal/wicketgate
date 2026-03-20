@@ -722,8 +722,11 @@ async function deleteKey(key, env) {
 // ─── Tunnel discovery ───────────────────────────────────────────────
 
 async function discoverTunnels(request, env) {
-	if (!CF_API_TOKEN || !CF_ACCOUNT_ID || CF_API_TOKEN === '__INJECT_CF_API_TOKEN__')
-		return secureJsonError(400, 'Discovery requires Cloudflare API Token and Account ID. Re-run deployment with CF_API_TOKEN and CF_ACCOUNT_ID environment variables exported to enable this feature.');
+	const activeToken = (CF_API_TOKEN !== '__INJECT_CF_API_TOKEN__' && CF_API_TOKEN !== '') ? CF_API_TOKEN : env.CF_API_TOKEN;
+	const activeAccountId = (CF_ACCOUNT_ID !== '__INJECT_CF_ACCOUNT_ID__' && CF_ACCOUNT_ID !== '') ? CF_ACCOUNT_ID : env.CF_ACCOUNT_ID;
+
+	if (!activeToken || !activeAccountId)
+		return secureJsonError(400, 'Discovery requires Cloudflare API Token and Account ID. Configure them as Workers Secrets or inject them during build.');
 
 	try {
 		// Fetch all pages of tunnels. A single AbortController is shared across all
@@ -741,8 +744,8 @@ async function discoverTunnels(request, env) {
 				let tunnelsData;
 				try {
 					const tunnelsRes = await fetch(
-						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
-						{ headers: { 'Authorization': `Bearer ${CF_API_TOKEN}` }, signal: tunnelAbort.signal }
+						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(activeAccountId)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
+						{ headers: { 'Authorization': `Bearer ${activeToken}` }, signal: tunnelAbort.signal }
 					);
 					if (!tunnelsRes.ok) {
 						if (tunnelsRes.status === 429)
@@ -815,9 +818,9 @@ async function discoverTunnels(request, env) {
 							const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
 							try {
 								const cfgRes = await fetch(
-									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
+									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(activeAccountId)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
 									{
-										headers: { 'Authorization': `Bearer ${CF_API_TOKEN}` },
+										headers: { 'Authorization': `Bearer ${activeToken}` },
 										// Combine per-tunnel and phase signals so the phase deadline can abort
 										// fetches that are still in-flight when cfgPhaseTimer fires, not just
 										// prevent new batches from starting.
