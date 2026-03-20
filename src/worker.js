@@ -503,7 +503,8 @@ async function replaceOrigin(slug, request, env) {
 	if (!body) return secureJsonError(400, 'Invalid or oversized request body.');
 
 	const { hostname, serviceTokenId, serviceTokenSecret, label } = body;
-	if (!hostname || !serviceTokenId || !serviceTokenSecret)
+	if (!hostname || typeof serviceTokenId !== 'string' || !serviceTokenId ||
+	    typeof serviceTokenSecret !== 'string' || !serviceTokenSecret)
 		return secureJsonError(400, 'Required: hostname, serviceTokenId, serviceTokenSecret.');
 
 	// Validate hostname
@@ -519,11 +520,11 @@ async function replaceOrigin(slug, request, env) {
 
 	// Validate label
 	if (label !== undefined) {
-		if (typeof label !== 'string' || label.length > MAX_LABEL_LENGTH)
+		if (typeof label !== 'string' || label.length === 0 || label.length > MAX_LABEL_LENGTH)
 			return secureJsonError(400, 'Invalid label.');
 	}
 
-	const normalizedLabel = (label !== undefined && label !== null && label !== '') ? label : slug;
+	const normalizedLabel = (label !== undefined && label !== null) ? label : slug;
 	const replaced = {
 		hostname: normalizedHostname,
 		serviceTokenId,
