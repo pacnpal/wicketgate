@@ -13,13 +13,10 @@
  * Secrets:
  *   ADMIN_SECRET        - Required for admin dashboard / API unless ALLOW_UNAUTH_ADMIN is set
  *   ALLOW_UNAUTH_ADMIN  - Set to "true" to skip built-in auth (only when /admin/* is externally gated)
- *   CF_API_TOKEN        - (Injected at build time via deploy script)
- *   CF_ACCOUNT_ID       - (Injected at build time via deploy script)
+ *   CF_API_TOKEN        - Cloudflare API Token for Discover tab (set as Worker Secret)
+ *   CF_ACCOUNT_ID       - Cloudflare Account ID for Discover tab (set as Worker Secret)
  */
 import DASHBOARD_HTML from './dashboard.html';
-
-const CF_API_TOKEN = "__INJECT_CF_API_TOKEN__";
-const CF_ACCOUNT_ID = "__INJECT_CF_ACCOUNT_ID__";
 
 // ── Security constants ──
 const MAX_SLUG_LENGTH = 48;
@@ -744,8 +741,8 @@ async function discoverTunnels(request, env) {
 				let tunnelsData;
 				try {
 					const tunnelsRes = await fetch(
-						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(activeAccountId)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
-						{ headers: { 'Authorization': `Bearer ${activeToken}` }, signal: tunnelAbort.signal }
+						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel?is_deleted=false&page=${page}&per_page=${perPage}`,
+						{ headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` }, signal: tunnelAbort.signal }
 					);
 					if (!tunnelsRes.ok) {
 						if (tunnelsRes.status === 429)
@@ -818,9 +815,9 @@ async function discoverTunnels(request, env) {
 							const cfgTimer = setTimeout(() => cfgAbort.abort(), DISCOVER_TIMEOUT_MS);
 							try {
 								const cfgRes = await fetch(
-									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(activeAccountId)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
+									`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/cfd_tunnel/${encodeURIComponent(tunnel.id)}/configurations`,
 									{
-										headers: { 'Authorization': `Bearer ${activeToken}` },
+										headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` },
 										// Combine per-tunnel and phase signals so the phase deadline can abort
 										// fetches that are still in-flight when cfgPhaseTimer fires, not just
 										// prevent new batches from starting.
